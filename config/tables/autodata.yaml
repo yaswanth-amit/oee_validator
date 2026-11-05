@@ -1,0 +1,169 @@
+# autodata: dbo.autodata (SQL Server, interface ids)  <->  production_core.autodata (Postgres, iot ids)
+# Postgres iot ids are joined back to interface ids through the Postgres master tables,
+# so both sides are compared in interface-id space. The joins are LEFT joins: an iot id
+# that does not resolve shows up as NULL and is reported, never dropped.
+
+name: autodata
+order: 2
+label: "autodata  -  dbo.autodata  vs  production_core.autodata"
+default_datatypes: [1, 2]
+
+sqlserver:
+  from: "dbo.autodata a"
+  source_id: "a.id"
+
+postgres:
+  from: |
+    production_core.autodata a
+    LEFT JOIN master_data.machine_information         m   ON m.iot_id   = a.machine_iot_id
+    LEFT JOIN master_data.component_information       c   ON c.iot_id   = a.component_iot_id
+    LEFT JOIN master_data.component_operation_pricing cop ON cop.iot_id = a.operation_iot_id
+    LEFT JOIN master_data.employee_information        e   ON e.iot_id   = a.operator_iot_id
+    LEFT JOIN master_data.down_code_information       d   ON d.iot_id   = a.down_iot_id
+  source_id: "a.id"
+
+time_column: st_time
+
+# Which records belong to a machines.csv row (logical day S = logical_day_start, E = logical_day_end).
+# Both sides follow SQL Server's own definition, the 4 cases used by its OEE procedures
+# (s_GetCockpitData, s_Get_production_down_shiftwise; checked 2026-11-04):
+#   1. msttime >= S and ndtime <= E                 fully inside (also zero-length / inverted rows)
+#   2. msttime <  S and ndtime >  S and ndtime <= E  crosses the start
+#   3. msttime >= S and msttime < E and ndtime > E   crosses the end
+#   4. msttime <  S and ndtime >  E                  spans the whole day
+# A NULL msttime or ndtime never matches (SQL comparisons with NULL are false).
+#
+# Postgres equivalent: a.cycletime_range is GENERATED ALWAYS AS tsrange(mst_time, nd_time)
+# (bounds '[)', GiST index idx_autodata_range_gist). For mst_time < nd_time the 4 cases are
+# exactly range overlap (&&). A zero-length row (mst_time = nd_time) has an empty range, which
+# overlaps nothing, so it is added explicitly with case 1 (S <= mst_time <= E). Postgres cannot
+# store mst_time > nd_time (tsrange rejects it), so such SQL Server rows show up as only_sqlserver.
+# {start} / {end} are sent as bound parameters.
+window_filter:
+  postgres: >-
+    a.mst_time IS NOT NULL AND a.nd_time IS NOT NULL
+    AND (tsrange({start}::timestamp, {end}::timestamp, '[)') && a.cycletime_range
+         OR (a.mst_time = a.nd_time AND a.mst_time >= {start} AND a.mst_time <= {end}))
+  sqlserver: >-
+    a.msttime IS NOT NULL AND a.ndtime IS NOT NULL
+    AND ((a.msttime >= {start} AND a.ndtime <= {end})
+      OR (a.msttime < {start} AND a.ndtime > {start} AND a.ndtime <= {end})
+      OR (a.msttime >= {start} AND a.msttime < {end} AND a.ndtime > {end})
+      OR (a.msttime < {start} AND a.ndtime > {end}))
+
+# Postgres is filtered on the iot id directly so it can use the autodata index.
+machine_filter:
+  sqlserver: {expr: "a.mc", csv: sqlserver_interface_id}
+  postgres:  {expr: "a.machine_iot_id", csv: postgres_iot_id}
+
+machine_key:
+  sqlserver: sqlserver_interface_id
+  postgres: postgres_interface_id
+
+datetime_precision: sqlserver_datetime
+
+key: [machine, datatype, st_time]
+
+columns:
+  machine:           {type: str, id: true, sql: "a.mc",   pg: "m.interface_id"}
+  # Component and operation: Postgres stores the interface id the machine sent in
+  # component_interface_id / operation_interface_id, even when no master exists yet (the
+  # iot id is linked later). That is the value SQL Server stores too, so it is compared.
+  # Older records have no stored id; for those the master join supplies it.
+  # Whether the iot id links to the right master is checked separately (invalid_checks).
+  component:         {type: str, id: true, sql: "a.comp", pg: "COALESCE(a.component_interface_id, c.interface_id)"}
+  operation:         {type: str, id: true, sql: "a.opn",  pg: "COALESCE(a.operation_interface_id, cop.interface_id)"}
+  operator:          {type: str, id: true, sql: "a.opr",  pg: "e.interface_id"}
+  datatype:          {type: int, sql: "a.datatype", pg: "a.datatype"}
+  # Predefined down codes (NO_DATA, SCI, McTI, ...) are matched by name through aliases.yaml;
+  # all other down codes are compared by interface id.
+  down_code:         {type: downcode,
+                      sql: "a.dcode",
+                      pg: "CASE WHEN lower(d.down_id) IN ({predefined_down_names}) THEN d.down_id ELSE d.interface_id END"}
+  st_date:           {type: date,     sql: "a.stdate",  pg: "a.st_date"}
+  st_time:           {type: datetime, sql: "a.sttime",  pg: "a.st_time"}
+  nd_date:           {type: date,     sql: "a.nddate",  pg: "a.nd_date"}
+  nd_time:           {type: datetime, sql: "a.ndtime",  pg: "a.nd_time"}
+  mst_time:          {type: datetime, sql: "a.msttime", pg: "a.mst_time"}
+  cycle_time:        {type: int,      sql: "a.cycletime",  pg: "a.cycle_time"}
+  load_unload:       {type: int,      sql: "a.loadunload", pg: "a.load_unload"}
+  # SQL Server stores 0 / '0' (column DEFAULT) where Postgres stores NULL. COALESCE on both sides
+  # makes NULL and 0 the same value, so a record that is NULL in both still matches.
+  part_count:        {type: decimal,  sql: "COALESCE(a.PartsCount, 0)", pg: "COALESCE(a.part_count, 0)"}
+  comp_slno:         {type: int,      sql: "COALESCE(a.compslno, 0)",   pg: "COALESCE(a.comp_slno, 0)"}
+  work_order_number: {type: str,      sql: "a.WorkOrderNumber", pg: "a.workorder_number"}
+  serial_number:     {type: str,      sql: "COALESCE(a.SerialNumber, '0')", pg: "COALESCE(a.serial_number, '0')"}
+  heat_code:         {type: str,      sql: "a.HeatCode",        pg: "a.heat_code"}
+  # Not compared yet (kept from the prototype). Uncomment once confirmed on both sides;
+  # they are listed under "Columns not compared" in every report.
+  # post:            {type: int,      sql: "a.post",            pg: "a.post"}
+  # supervisor_code: {type: str,      sql: "a.SupervisorCode",  pg: "a.supervisor_code"}
+  # remarks:         {type: str,      sql: "a.Remarks",         pg: "a.remarks"}
+  # action_taken:    {type: str,      sql: "a.ActionTaken",     pg: "a.action_taken"}
+  # is_modified:     {type: bool,     sql: "a.IsModified",      pg: "a.is_modified"}
+  # kwh:             {type: decimal,  sql: "a.KWH",             pg: "a.kwh"}
+  # net_kwh:         {type: decimal,  sql: "a.NetKWH",          pg: "a.net_kwh"}
+
+# Named here so the report can say which columns are deliberately left out.
+not_compared: [post, supervisor_code, remarks, action_taken, is_modified, kwh, net_kwh]
+
+info:
+  sqlserver:
+    # In-cycle down (ICD), by SQL Server's own rule in s_GetCockpitData: a down (type 2) that lies
+    # strictly inside a production cycle (type 1) which took longer than its cycle time.
+    is_icd: >-
+      CASE WHEN a.datatype = 2 AND EXISTS (
+        SELECT 1 FROM dbo.autodata c
+        WHERE c.mc = a.mc AND c.datatype = 1
+          AND DATEDIFF(second, c.sttime, c.ndtime) > c.cycletime
+          AND a.sttime > c.sttime AND a.ndtime < c.ndtime)
+      THEN 1 ELSE 0 END
+  postgres:
+    machine_iot_id: "a.machine_iot_id"
+    component_iot_id: "a.component_iot_id"
+    operation_iot_id: "a.operation_iot_id"
+    operator_iot_id: "a.operator_iot_id"
+    down_iot_id: "a.down_iot_id"
+    down_name: "d.down_id"
+    is_icd: "a.is_icd"
+    stored_component_interface_id: "a.component_interface_id"
+    stored_operation_interface_id: "a.operation_interface_id"
+    master_component_interface_id: "c.interface_id"
+    master_operation_interface_id: "cop.interface_id"
+
+known_differences:
+  - side: sqlserver
+    when: {down_code: ["NPCy", "POWER_OFF", "Dummy Cycle", "Dry Cycle"]}
+    reason: "SQL Server-only rule (NPCy / power-off / dummy / dry cycle) - not ported to Postgres"
+
+report:
+  counts:
+    "Production cycles (1)": [1]
+    "Down records (2)": [2]
+  # ICD records: Postgres stores the is_icd flag; SQL Server has no flag, so its count uses
+  # the s_GetCockpitData rule (info.sqlserver.is_icd above).
+  flags:
+    "ICD (in-cycle downs)":
+      sqlserver: {info: is_icd, value: "1"}
+      postgres:  {info: is_icd, value: "True"}
+  sums:
+    "Sum cycle_time, cycles (s)":   {column: cycle_time, datatypes: [1]}
+    "Sum load_unload, cycles (s)":  {column: load_unload, datatypes: [1]}
+    "Sum part_count, cycles":       {column: part_count, datatypes: [1]}
+    "Sum down duration (s)":        {duration: [st_time, nd_time], datatypes: [2]}
+  # A record is invalid when a code does not resolve in that side's master data.
+  # SQL Server: the code is empty or missing from the master query below (the shift
+  # aggregation INNER-joins these, so such rows are later dropped without error).
+  # Postgres, checked in this order:
+  #   postgres_iot empty                 -> no master yet (the stored interface id is still compared)
+  #   iot id set but no master row       -> the iot id does not resolve
+  #   postgres_master differs from value -> the iot id is linked to a master with another interface id
+  invalid_checks:
+    component: {sqlserver_master: "SELECT InterfaceID FROM dbo.componentinformation",
+                postgres_iot: component_iot_id, postgres_master: master_component_interface_id}
+    operation: {sqlserver_master: "SELECT InterfaceID FROM dbo.componentoperationpricing",
+                postgres_iot: operation_iot_id, postgres_master: master_operation_interface_id}
+    operator:  {sqlserver_master: "SELECT interfaceid FROM dbo.employeeinformation",
+                postgres_iot: operator_iot_id}
+    down_code: {sqlserver_master: "SELECT interfaceid FROM dbo.downcodeinformation", datatypes: [2],
+                postgres_iot: down_iot_id}

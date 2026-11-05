@@ -1,0 +1,24 @@
+# Database connections used by the comparison framework.
+# Passwords are NOT stored here: each one is read from the environment variable
+# named in `password_env` (a local oee_validator/.env file is loaded automatically).
+# Both connections are used read-only - the framework only ever runs SELECTs.
+
+sqlserver:
+  driver: "ODBC Driver 17 for SQL Server"
+  server: 'AMIT-SERVER-QA'
+  database: TPM_PGSQL
+  user: sa
+  password_env: OEE_SQL_PASSWORD
+  trust_server_certificate: true
+  timeout_seconds: 300
+
+postgres:
+  host: 172.36.0.107
+  port: 5434
+  dbname: tpm_baseline_qa
+  user: postgres
+  password_env: OEE_PG_PASSWORD
+  timeout_seconds: 300
+
+# Safety cap: a comparison is refused when either side would return more rows than this.
+max_rows_per_side: 1000000

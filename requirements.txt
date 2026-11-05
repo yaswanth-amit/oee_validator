@@ -1,0 +1,7 @@
+polars>=1.20
+xlsxwriter>=3.2
+pyodbc>=5.0
+psycopg2-binary>=2.9
+PyYAML>=6.0
+pytest>=8.0
+openpyxl>=3.1      # tests only: reads the workbook back

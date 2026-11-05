@@ -1,0 +1,101 @@
+# rawdata: dbo.RawData (SQL Server)  <->  production_core.rawdata (Postgres)
+# Both sides store interface ids, so only column names and generic slots need mapping.
+
+name: rawdata
+order: 1
+label: "rawdata  -  dbo.RawData  vs  production_core.rawdata"
+default_datatypes: [1, 2, 11, 22, 42]
+
+sqlserver:
+  from: "dbo.RawData r"
+  source_id: "r.SlNo"
+
+postgres:
+  from: "production_core.rawdata r"
+  source_id: "r.id"
+
+# Which column is the record time (window filter, coverage, ordering).
+# rawdata has no window_filter: a record belongs to a machines.csv row when its st_time is
+# inside that row's logical day [logical_day_start, logical_day_end).
+time_column: st_time
+
+# How each side is filtered to the machines in machines.csv.
+#   expr = the SQL expression filtered with IN (...)
+#   csv  = the machines.csv column holding the value for that expression
+machine_filter:
+  sqlserver: {expr: "r.Mc", csv: sqlserver_interface_id}
+  postgres:  {expr: "r.machine_interface_id", csv: postgres_interface_id}
+
+# The machines.csv column whose value equals the mapped `machine` column on each side.
+# Rows are paired on machine_name from the CSV, so a machine pairs even if its ids differ.
+machine_key:
+  sqlserver: sqlserver_interface_id
+  postgres: postgres_interface_id
+
+# SQL Server RawData.Sttime/Ndtime are `datetime` (stored in 1/300 s steps).
+# Postgres timestamps are rounded the same way before they are compared, which is
+# exactly the value SQL Server would have stored for the same input string.
+datetime_precision: sqlserver_datetime
+
+key: [machine, datatype, st_time]
+
+# Column types: str | int | decimal | float | datetime | date | bool | status | downcode
+# id: true       -> an interface id (lenient mode strips leading zeros)
+# compare: false -> fetched and shown, never counted as a difference
+columns:
+  machine:           {type: str, id: true, sql: "r.Mc",   pg: "r.machine_interface_id"}
+  component:         {type: str, id: true, sql: "r.Comp", pg: "r.component_interface_id"}
+  operation:         {type: str, id: true, sql: "r.Opn",  pg: "r.operation_interface_id"}
+  operator:          {type: str, id: true, sql: "r.Opr",  pg: "r.operator_interface_id"}
+  datatype:          {type: int, sql: "r.DataType", pg: "r.datatype"}
+  st_time:           {type: datetime, sql: "r.Sttime", pg: "r.st_time"}
+  nd_time:           {type: datetime, sql: "r.Ndtime", pg: "r.nd_time"}
+  # SQL Server keeps the down code in SPLSTRING2 for down-type records only
+  # (for datatype 1 SPLSTRING2 holds the embedded ICD list, which Postgres does not keep).
+  down_code:         {type: str, id: true,
+                      sql: "CASE WHEN r.DataType IN (2, 22, 42, 62) THEN r.SPLSTRING2 END",
+                      pg: "r.down_interface_id"}
+  # SQL Server keeps the part count in SPLSTRING1 (int) for cycle records.
+  part_count:        {type: decimal, sql: "CASE WHEN r.DataType = 1 THEN r.SPLSTRING1 END", pg: "r.part_count"}
+  work_order_number: {type: str, sql: "r.WorkOrderNumber", pg: "r.work_order_number"}
+  serial_number:     {type: str, sql: "r.SPLString3",      pg: "r.serial_number"}
+  heat_code:         {type: str, sql: "r.SPLString4",      pg: "r.heat_code"}
+  supervisor_code:   {type: str, sql: "r.SupervisorCode",  pg: "r.supervisor_code"}
+  status:            {type: status, sql: "r.Status",       pg: "r.status"}
+
+# Shown for investigation only, never compared.
+info:
+  sqlserver:
+    splstring2_raw: "r.SPLSTRING2"
+    ip_address: "r.IPAddress"
+  postgres:
+    string_id: "r.string_id"
+    extra_fields: "array_to_string(r.extra_fields, '|')"
+
+# Records that exist on one side only *by design*. They are still listed, but labelled
+# with the reason, and they do not fail the machine's verdict.
+known_differences:
+  - side: sqlserver
+    when: {datatype: ["22"]}
+    reason: "Down Start (22) is not stored in Postgres rawdata - it only updates machine running status"
+  - side: sqlserver
+    when: {datatype: ["62"]}
+    reason: "Power-off (62) has no Postgres parse template"
+  - side: sqlserver
+    when: {status: ["start_not_before_end"]}
+    reason: "Start time not before end time: SQL Server logs it (status 8), Postgres drops it at parse time"
+
+# What the summary counts for this table.
+report:
+  counts:                       # label -> datatypes
+    "Production (1)": [1]
+    "Down (2)": [2]
+    "ICD (42)": [42]
+    "Type 11": [11]
+    "Type 22": [22]
+  # Records are classed by the meaning of their status (aliases.yaml).
+  status:
+    column: status
+    processed: [processed]
+    not_processed: [not_processed]
+    # every other meaning is an invalid (rejected) record

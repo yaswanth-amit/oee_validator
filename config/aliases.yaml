@@ -1,0 +1,48 @@
+# Code translations between SQL Server and Postgres.
+# These are master-data equivalences, not tolerances: a value that is not listed
+# here is compared exactly as stored.
+
+# Predefined (system-generated) down codes.
+# Key   = the canonical spelling (SQL Server downcodeinformation.interfaceid).
+# Value = every spelling Postgres may use, matched case-insensitively against
+#         down_code_information.down_id / interface_id.
+# SQL Server values are also matched case-insensitively against the key and its list
+# (procs write 'UNKNOWN' while the master row is 'unknown').
+predefined_downcodes:
+  NO_DATA: [no_data]
+  SCI: [sci]
+  SCILU: [scilu]
+  DCL: [dcl]
+  DCLU: [dclu]
+  LoadUnload: [load_unload]
+  McTI: [mcti]
+  UNKNOWN: [unknown]
+  # SQL Server writes the *interfaceid* of the 'Setup Change' down code here;
+  # replace the key with that interface id for your installation.
+  Setup Change: [set_up_change]
+
+# rawdata.status meaning on each side (the numbers differ, the meanings must match).
+status:
+  sqlserver:
+    0: not_processed
+    1: processed
+    4: unknown_machine
+    5: duplicate
+    6: out_of_sequence
+    7: future_dated
+    8: start_not_before_end
+    9: invalid_date
+    10: unsupported_setting
+    11: sql_error
+    12: insert_failure
+    13: invalid_value
+    14: event_error
+    15: not_processed        # datatype 11/22 are stored as 15 and never processed
+  postgres:
+    0: not_processed         # includes datatype 11, which stays 0 forever
+    1: processed
+    3: unexpected_error
+    4: unknown_machine
+    5: duplicate
+    6: out_of_sequence
+    8: future_dated
