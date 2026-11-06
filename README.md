@@ -2,7 +2,7 @@
 
 A batch tool that checks, machine by machine and record by record, that the new Postgres
 pipeline holds exactly the same `rawdata` and `autodata` records as the SQL Server pipeline.
-It is built on Polars. You give it a machine list where each row is one machine and one logical
+It is built on Polars. You give it a machine list where each row is one machine name and one logical
 day, and it writes two files per row:
 
 | File | For |
@@ -51,10 +51,10 @@ So the tool can run as a scheduled job.
 ### machines.csv
 
 ```csv
-machine_name,sqlserver_interface_id,postgres_interface_id,postgres_iot_id,logical_day_start,logical_day_end
-Machine-01,1001,1001,1,2026-10-10 06:00:00,2026-10-11 06:00:00
-Machine-01,1001,1001,1,2026-10-11 06:00:00,2026-10-12 06:00:00
-Machine-02,1002,1002,3,2026-10-10 06:00:00,2026-10-11 06:00:00
+machine_name,logical_day_start,logical_day_end
+Machine-01,2026-10-10 06:00:00,2026-10-11 06:00:00
+Machine-01,2026-10-11 06:00:00,2026-10-12 06:00:00
+Machine-02,2026-10-10 06:00:00,2026-10-11 06:00:00
 ```
 
 Each row is one job with its own report. The logical day is `[logical_day_start, logical_day_end)`:
@@ -62,12 +62,19 @@ the start is included, the end is not. Timestamps must be `YYYY-MM-DD HH:MM:SS` 
 If you edit the file in Excel, check that Excel has not rewritten them as `10-10-2026 06:00` or
 `10/10/2026`: those are rejected rather than guessed.
 
-A machine can appear on several rows (one per day), but always with the same ids. Records are paired on
-`machine_name`, so a machine pairs correctly even if its ids differ between the systems. Before any data
-is read, the list is checked for empty cells, bad timestamps, an end that is not after the start, a machine
-with different ids on different rows, an id used by two machines, and the same machine and day twice. It is
-also checked against both machine masters, and the run stops if an id is missing or if the Postgres iot id
-belongs to another interface id. Postgres `autodata` is filtered on `postgres_iot_id`, so its index is used.
+The ids are not in the file. Before any data is read, each `machine_name` is looked up in both machine
+masters (trimmed, case-insensitive):
+
+| System | Looked up in | Gives |
+|---|---|---|
+| SQL Server | `dbo.machineinformation.machineid` | `InterfaceID` |
+| Postgres | `master_data.machine_information.machine_id` | `interface_id`, `iot_id` |
+
+The run stops if a name is missing from either master, appears more than once in one, or has no id there.
+The resolved ids are shown in the Excel `machines` sheet. A machine can appear on several rows (one per day);
+the same machine and day twice is rejected. Records are paired on `machine_name`, so a machine pairs correctly
+even if its ids differ between the systems. Postgres `autodata` is filtered on the resolved `postgres_iot_id`,
+so its index is used. Older files that still have the id columns load fine; those columns are ignored.
 
 ### Which records belong to a logical day
 

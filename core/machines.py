@@ -1,12 +1,13 @@
-"""machines.csv: one comparison job per row - a machine, its id in each system, and a logical day.
+"""machines.csv: one comparison job per row - a machine name and a logical day.
 
-    machine_name,sqlserver_interface_id,postgres_interface_id,postgres_iot_id,logical_day_start,logical_day_end
-    Machine-01,1001,1001,1,2026-10-10 06:00:00,2026-10-11 06:00:00
+    machine_name,logical_day_start,logical_day_end
+    Machine-01,2026-10-10 06:00:00,2026-10-11 06:00:00
 
 Each row produces its own Markdown and Excel report. A machine may appear on several rows
-(different days), but always with the same ids. Records are paired on machine_name, so a
-machine pairs correctly even when its ids differ between the systems. The list is checked
-before any data is read.
+(different days). The machine's ids are not in the file: they are looked up by name in both
+machine masters (SQL Server dbo.machineinformation.machineid, Postgres
+master_data.machine_information.machine_id) before any data is read. Records are paired on
+machine_name, so a machine pairs correctly even when its ids differ between the systems.
 """
 from __future__ import annotations
 
@@ -15,9 +16,9 @@ from pathlib import Path
 
 import polars as pl
 
-from .config import MACHINE_CSV_COLUMNS, WINDOW_CSV_COLUMNS
+from .config import WINDOW_CSV_COLUMNS
 
-CSV_COLUMNS = MACHINE_CSV_COLUMNS + WINDOW_CSV_COLUMNS
+CSV_COLUMNS = ("machine_name",) + WINDOW_CSV_COLUMNS
 _TS_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M")
 
 
@@ -40,7 +41,7 @@ class MachineListError(ValueError):
 
 def load_machines(path: str | Path) -> pl.DataFrame:
     """Read and check the CSV. Returns one row per job, in file order, with the logical day
-    columns parsed to datetimes."""
+    columns parsed to datetimes. Extra columns (such as the old id columns) are ignored."""
     path = Path(path)
     if not path.exists():
         raise MachineListError([f"file not found: {path}"])
@@ -76,19 +77,9 @@ def load_machines(path: str | Path) -> pl.DataFrame:
         starts.append(s)
         ends.append(e)
 
-    # a machine may repeat (one row per day), but its ids must not change between rows,
-    # and one id must not belong to two machines
-    ids = df.select(MACHINE_CSV_COLUMNS).filter(pl.all_horizontal(pl.col(c).is_not_null() & (pl.col(c) != "")
-                                                                  for c in MACHINE_CSV_COLUMNS)).unique(maintain_order=True)
-    for c in MACHINE_CSV_COLUMNS:
-        dups = ids.filter(pl.col(c).is_duplicated())[c].unique(maintain_order=True).to_list()
-        if dups and c == "machine_name":
-            problems.append(f"machine_name with different ids on different rows: {', '.join(dups)}")
-        elif dups:
-            problems.append(f"{c} used by more than one machine: {', '.join(dups)}")
-    rep = df.filter(pl.struct(["machine_name", *WINDOW_CSV_COLUMNS]).is_duplicated())
+    rep = df.filter(pl.struct(list(CSV_COLUMNS)).is_duplicated())
     if rep.height:
-        names = rep.select(pl.concat_str(["machine_name", *WINDOW_CSV_COLUMNS], separator=" ")).unique(
+        names = rep.select(pl.concat_str(list(CSV_COLUMNS), separator=" ")).unique(
             maintain_order=True).to_series().to_list()
         problems.append(f"the same machine and logical day appear more than once: {'; '.join(names)}")
     if problems:
@@ -98,36 +89,52 @@ def load_machines(path: str | Path) -> pl.DataFrame:
     return df.with_row_index("machine_order")
 
 
-def check_against_masters(machines: pl.DataFrame, sql_master: dict[str, list],
-                          pg_master: dict[str, list]) -> pl.DataFrame:
-    """Add found/name columns from both machine masters. Raises if an id is missing or the
-    Postgres iot id belongs to a different interface id than the one in the CSV."""
-    sql = {str(i).strip(): n for i, n in zip(sql_master["interface_id"], sql_master["name"]) if i is not None}
-    pg_by_if = {str(i).strip(): (str(t), n) for i, t, n in
-                zip(pg_master["interface_id"], pg_master["iot_id"], pg_master["name"]) if i is not None}
-    pg_by_iot = {str(t).strip(): str(i).strip() for i, t in
-                 zip(pg_master["interface_id"], pg_master["iot_id"]) if t is not None and i is not None}
+def _by_name(names: list, *cols: list) -> dict[str, list[tuple]]:
+    """Master rows keyed by trimmed, case-insensitive machine name (a name may repeat)."""
+    out: dict[str, list[tuple]] = {}
+    for n, *vals in zip(names, *cols):
+        if n is not None:
+            out.setdefault(str(n).strip().lower(), []).append(
+                tuple(None if v is None else str(v).strip() for v in vals))
+    return out
+
+
+def resolve_ids(machines: pl.DataFrame, sql_master: dict[str, list],
+                pg_master: dict[str, list]) -> pl.DataFrame:
+    """Look up each machine_name in both machine masters and add its ids:
+    sqlserver_interface_id, postgres_interface_id and postgres_iot_id, plus the master names.
+    Raises if a name is missing from a master, appears more than once, or has no id."""
+    sql = _by_name(sql_master["name"], sql_master["interface_id"])
+    pg = _by_name(pg_master["name"], pg_master["interface_id"], pg_master["iot_id"])
+    sql_names = {str(n).strip().lower(): str(n) for n in sql_master["name"] if n is not None}
+    pg_names = {str(n).strip().lower(): str(n) for n in pg_master["name"] if n is not None}
     problems, rows = [], []
     for r in machines.iter_rows(named=True):
         name = r["machine_name"]
-        s_id, p_id, p_iot = r["sqlserver_interface_id"], r["postgres_interface_id"], r["postgres_iot_id"]
-        in_sql, in_pg, iot_ok = s_id in sql, p_id in pg_by_if, p_iot in pg_by_iot
-        if not in_sql:
-            problems.append(f"{name}: SQL Server interface id {s_id!r} is not in dbo.machineinformation")
-        if not in_pg:
-            problems.append(f"{name}: Postgres interface id {p_id!r} is not in master_data.machine_information")
-        if not iot_ok:
-            problems.append(f"{name}: Postgres iot id {p_iot!r} is not in master_data.machine_information")
-        elif pg_by_iot[p_iot] != p_id:
-            problems.append(f"{name}: Postgres iot id {p_iot} belongs to interface id "
-                            f"{pg_by_iot[p_iot]!r}, not {p_id!r}")
-        rows.append({**r, "sqlserver_name": sql.get(s_id), "postgres_name": pg_by_if.get(p_id, (None, None))[1],
-                     "found_in_sqlserver": in_sql, "found_in_postgres": in_pg and iot_ok})
+        key = name.strip().lower()
+        s_rows, p_rows = sql.get(key, []), pg.get(key, [])
+        if not s_rows:
+            problems.append(f"{name}: not found in SQL Server dbo.machineinformation (machineid)")
+        elif len(s_rows) > 1:
+            problems.append(f"{name}: appears {len(s_rows)} times in SQL Server dbo.machineinformation")
+        elif not s_rows[0][0]:
+            problems.append(f"{name}: has no InterfaceID in SQL Server dbo.machineinformation")
+        if not p_rows:
+            problems.append(f"{name}: not found in Postgres master_data.machine_information (machine_id)")
+        elif len(p_rows) > 1:
+            problems.append(f"{name}: appears {len(p_rows)} times in Postgres master_data.machine_information")
+        elif not p_rows[0][0] or not p_rows[0][1]:
+            problems.append(f"{name}: has no interface_id or iot_id in Postgres master_data.machine_information")
+        s_id = s_rows[0][0] if len(s_rows) == 1 else None
+        p_if, p_iot = p_rows[0] if len(p_rows) == 1 else (None, None)
+        rows.append({**r, "sqlserver_interface_id": s_id, "postgres_interface_id": p_if, "postgres_iot_id": p_iot,
+                     "sqlserver_name": sql_names.get(key), "postgres_name": pg_names.get(key),
+                     "found_in_sqlserver": bool(s_id), "found_in_postgres": bool(p_if and p_iot)})
     if problems:
         raise MachineListError(list(dict.fromkeys(problems)))     # a machine on several rows: report once
     return pl.DataFrame(rows, schema_overrides={"machine_order": pl.UInt32})
 
 
 def id_to_name(machines: pl.DataFrame, csv_column: str) -> dict[str, str]:
-    """Map an id column of the CSV to machine_name (ids compared trimmed, leading zeros kept)."""
+    """Map an id column (resolved from the masters) to machine_name."""
     return dict(zip(machines[csv_column].to_list(), machines["machine_name"].to_list()))

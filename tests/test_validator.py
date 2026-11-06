@@ -16,7 +16,7 @@ from oee_validator.core.compare import (DIFFERENT, FAIL, IDENTICAL, NO_DATA, ONL
 from oee_validator.core.config import ConfigError, load_aliases, load_table_specs, parse_table
 from oee_validator.core.db import SOURCE_ID, Window, build_count, build_select
 from oee_validator.core.excel import write_workbook
-from oee_validator.core.machines import MachineListError, check_against_masters, load_machines
+from oee_validator.core.machines import MachineListError, load_machines, resolve_ids
 from oee_validator.core.markdown import render
 from oee_validator.core.normalize import canon_decimal, canon_int, canonical_series, sqlserver_datetime_round
 from oee_validator.core.pipeline import RunResult, compare_table, findings
@@ -303,33 +303,29 @@ def test_int_column_with_mixed_driver_types():
 
 # --------------------------------------------------------------------------- machines, config, queries
 
-CSV_HEAD = ("machine_name,sqlserver_interface_id,postgres_interface_id,postgres_iot_id,"
-            "logical_day_start,logical_day_end\n")
+CSV_HEAD = "machine_name,logical_day_start,logical_day_end\n"
 DAY1 = "2026-10-10 06:00:00,2026-10-11 06:00:00"
 DAY2 = "2026-10-11 06:00:00,2026-10-12 06:00:00"
 
 
 def test_machine_csv_checks(tmp_path):
     f = tmp_path / "m.csv"
-    f.write_text(CSV_HEAD + f"A,1,1,1,{DAY1}\nA,2,2,2,{DAY2}\nB,,3,3,{DAY1}\n", encoding="utf-8")
+    f.write_text(CSV_HEAD + f"A,{DAY1}\n,{DAY2}\n", encoding="utf-8")
     with pytest.raises(MachineListError) as e:
         load_machines(f)
-    assert any("machine_name with different ids on different rows: A" in p for p in e.value.problems)
-    assert any("'sqlserver_interface_id' is empty" in p for p in e.value.problems)
-    f.write_text("machine_name,sqlserver_interface_id\nA,1\n", encoding="utf-8")
-    with pytest.raises(MachineListError, match="missing column"):
+    assert any("'machine_name' is empty" in p for p in e.value.problems)
+    f.write_text("machine_name,logical_day_start\nA,2026-10-10 06:00:00\n", encoding="utf-8")
+    with pytest.raises(MachineListError, match="missing column.*logical_day_end"):
         load_machines(f)
-    # the old 4-column file is rejected with the names of the new columns
-    f.write_text("machine_name,sqlserver_interface_id,postgres_interface_id,postgres_iot_id\nA,1,1,1\n",
-                 encoding="utf-8")
-    with pytest.raises(MachineListError, match="logical_day_start, logical_day_end"):
-        load_machines(f)
+    # the old file with id columns still loads; the ids are ignored and looked up from the masters
+    f.write_text("machine_name,sqlserver_interface_id,postgres_interface_id,postgres_iot_id,"
+                 f"logical_day_start,logical_day_end\nA,9,9,9,{DAY1}\n", encoding="utf-8")
+    assert load_machines(f).columns == ["machine_order", "machine_name", "logical_day_start", "logical_day_end"]
 
 
 def test_machine_csv_one_job_per_row(tmp_path):
     f = tmp_path / "m.csv"
-    f.write_text(CSV_HEAD + f"A,1,1,1,{DAY1}\nA,1,1,1,{DAY2}\nB,2,2,2,2026-10-10 06:00,2026-10-11 06:00\n",
-                 encoding="utf-8")
+    f.write_text(CSV_HEAD + f"A,{DAY1}\nA,{DAY2}\nB,2026-10-10 06:00,2026-10-11 06:00\n", encoding="utf-8")
     df = load_machines(f)
     assert df.height == 3 and df["machine_name"].to_list() == ["A", "A", "B"]
     assert df["logical_day_start"].to_list() == [datetime(2026, 10, 10, 6), datetime(2026, 10, 11, 6),
@@ -338,11 +334,10 @@ def test_machine_csv_one_job_per_row(tmp_path):
 
 
 @pytest.mark.parametrize("rows, message", [
-    (f"A,1,1,1,{DAY1}\nA,1,1,1,{DAY1}\n", "the same machine and logical day appear more than once"),
-    (f"A,1,1,1,{DAY1}\nB,1,2,2,{DAY1}\n", "sqlserver_interface_id used by more than one machine: 1"),
-    ("A,1,1,1,10-10-2026 06:00,2026-10-11 06:00:00\n", "is not a timestamp"),
-    ("A,1,1,1,2026-10-11 06:00:00,2026-10-10 06:00:00\n", "is not after logical_day_start"),
-    ("A,1,1,1,2026-10-10 06:00:00,\n", "'logical_day_end' is empty"),
+    (f"A,{DAY1}\nA,{DAY1}\n", "the same machine and logical day appear more than once"),
+    ("A,10-10-2026 06:00,2026-10-11 06:00:00\n", "is not a timestamp"),
+    ("A,2026-10-11 06:00:00,2026-10-10 06:00:00\n", "is not after logical_day_start"),
+    ("A,2026-10-10 06:00:00,\n", "'logical_day_end' is empty"),
 ])
 def test_machine_csv_rejects_bad_rows(tmp_path, rows, message):
     f = tmp_path / "m.csv"
@@ -351,13 +346,25 @@ def test_machine_csv_rejects_bad_rows(tmp_path, rows, message):
         load_machines(f)
 
 
-def test_machine_master_check_catches_wrong_iot_id():
-    sql = {"interface_id": ["1001"], "name": ["M1"]}
+def test_machine_ids_resolved_from_masters(tmp_path):
+    sql = {"interface_id": ["1001", "1002"], "name": ["M1", "M2"]}
     pg = {"interface_id": ["1001", "1002"], "iot_id": ["1", "3"], "name": ["M1", "M2"]}
-    ok = check_against_masters(machines((("M1", "1001", "1001", "1"),)), sql, pg)
-    assert ok["found_in_sqlserver"].to_list() == [True]
-    with pytest.raises(MachineListError, match="belongs to interface id '1002'"):
-        check_against_masters(machines((("M1", "1001", "1001", "3"),)), sql, pg)
+    f = tmp_path / "m.csv"
+    f.write_text(CSV_HEAD + f"m1,{DAY1}\nM2,{DAY1}\nM1,{DAY2}\n", encoding="utf-8")
+    ok = resolve_ids(load_machines(f), sql, pg)
+    assert ok["sqlserver_interface_id"].to_list() == ["1001", "1002", "1001"]
+    assert ok["postgres_iot_id"].to_list() == ["1", "3", "1"]
+    assert ok["machine_name"].to_list() == ["m1", "M2", "M1"]          # name kept as written in the CSV
+    assert ok["found_in_sqlserver"].all() and ok["found_in_postgres"].all()
+    f.write_text(CSV_HEAD + f"M3,{DAY1}\nM3,{DAY2}\n", encoding="utf-8")
+    with pytest.raises(MachineListError) as e:
+        resolve_ids(load_machines(f), sql, pg)
+    assert e.value.problems == ["M3: not found in SQL Server dbo.machineinformation (machineid)",
+                                "M3: not found in Postgres master_data.machine_information (machine_id)"]
+    pg_dup = {"interface_id": ["1001", "1009"], "iot_id": ["1", "9"], "name": ["M1", "M1"]}
+    f.write_text(CSV_HEAD + f"M1,{DAY1}\n", encoding="utf-8")
+    with pytest.raises(MachineListError, match="appears 2 times in Postgres"):
+        resolve_ids(load_machines(f), sql, pg_dup)
 
 
 def test_query_filters_machines_window_and_datatypes():

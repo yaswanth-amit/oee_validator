@@ -1,4 +1,4 @@
-machine_name,sqlserver_interface_id,postgres_interface_id,postgres_iot_id,logical_day_start,logical_day_end
-Machine-01,1001,1001,1,2026-10-10 06:00:00,2026-10-11 06:00:00
-Machine-01,1001,1001,1,2026-10-11 06:00:00,2026-10-12 06:00:00
-Machine-02,1002,1002,3,2026-10-10 06:00:00,2026-10-11 06:00:00
+machine_name,logical_day_start,logical_day_end
+Machine-01,2026-10-10 06:00:00,2026-10-11 06:00:00
+Machine-01,2026-10-11 06:00:00,2026-10-12 06:00:00
+Machine-02,2026-10-10 06:00:00,2026-10-11 06:00:00

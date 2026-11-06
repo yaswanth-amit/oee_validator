@@ -29,8 +29,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Validate that Postgres holds exactly the same OEE records as SQL Server, "
                     "one report per machines.csv row (machine + logical day).")
     p.add_argument("--machines", required=True,
-                   help="CSV: machine_name, sqlserver_interface_id, postgres_interface_id, postgres_iot_id, "
-                        "logical_day_start, logical_day_end (YYYY-MM-DD HH:MM:SS; end exclusive)")
+                   help="CSV: machine_name, logical_day_start, logical_day_end (YYYY-MM-DD HH:MM:SS; "
+                        "end exclusive). Machine ids are looked up by name in both machine masters.")
     p.add_argument("--tables", nargs="+", help="tables to compare (default: all configured, rawdata then autodata)")
     p.add_argument("--datatypes", nargs="+", metavar="TABLE=1,2,42",
                    help="override the datatypes of a table, e.g. rawdata=1,2,42 (use TABLE=all for no filter)")

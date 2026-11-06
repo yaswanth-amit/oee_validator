@@ -19,7 +19,7 @@ from .config import (WINDOW_CSV_COLUMNS, Aliases, TableSpec, load_aliases, load_
                      load_table_specs)
 from .db import (PG_MACHINES, SQL_MACHINES, Connections, TooManyRows, Window, fetch, fetch_master_set,
                  fetch_side, open_connections, server_info)
-from .machines import check_against_masters, load_machines
+from .machines import load_machines, resolve_ids
 from .metrics import TableMetrics, table_metrics
 
 
@@ -109,9 +109,8 @@ def run(machines_csv: str | Path, tables: list[str] | None = None, strict: bool 
     try:
         servers = server_info(conns, conn_cfg)
         log(f"SQL Server {servers['sqlserver']} | Postgres {servers['postgres']}")
-        machines = check_against_masters(machines, fetch(conns.sqlserver, SQL_MACHINES),
-                                         fetch(conns.postgres, PG_MACHINES))
-        log("machine list checked against both machine masters")
+        machines = resolve_ids(machines, fetch(conns.sqlserver, SQL_MACHINES), fetch(conns.postgres, PG_MACHINES))
+        log("machine ids looked up by name in both machine masters")
         run_specs = {n: dataclasses.replace(specs[n], datetime_precision="exact") if exact_time else specs[n]
                      for n in tables}
         sql_masters: dict[str, dict[str, set[str]]] = {}     # per table, read once for all jobs

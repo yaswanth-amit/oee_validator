@@ -14,6 +14,9 @@ TABLES_DIR = CONFIG_DIR / "tables"
 COLUMN_TYPES = {"str", "int", "decimal", "float", "datetime", "date", "bool", "status", "downcode"}
 SIDES = ("sqlserver", "postgres")
 DATETIME_PRECISIONS = {"exact", "sqlserver_datetime"}
+# machine_name comes from machines.csv; the three id columns are looked up by name in both
+# machine masters before any data is read (core/machines.py, resolve_ids). The table YAMLs
+# refer to these column names in machine_filter / machine_key.
 MACHINE_CSV_COLUMNS = ("machine_name", "sqlserver_interface_id", "postgres_interface_id", "postgres_iot_id")
 WINDOW_CSV_COLUMNS = ("logical_day_start", "logical_day_end")      # per row: [start, end)
 
