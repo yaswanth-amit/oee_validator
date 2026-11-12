@@ -96,6 +96,7 @@ class ColumnSpec:
     pg: str
     id: bool = False
     compare: bool = True
+    round: int | None = None          # decimal places both sides are rounded to before comparing
 
     def expr(self, side: str) -> str:
         return self.sql if side == "sqlserver" else self.pg
@@ -118,6 +119,20 @@ class ReportSpec:
 
 
 @dataclass
+class ProcedureSpec:
+    """A report procedure that is executed instead of a SELECT (kind: procedure).
+
+    call      SQL with {start}, {end} and {machine} placeholders (sent as bound parameters)
+    machine   the machine-list column whose value is passed as {machine}
+    reviewed  routine name -> SHA-256 of the definition that was reviewed. The call is refused
+              when a definition on the server differs (see core/db.py, routine_fingerprints).
+    """
+    call: str
+    machine: str
+    reviewed: dict[str, str]
+
+
+@dataclass
 class TableSpec:
     name: str
     label: str
@@ -135,8 +150,11 @@ class TableSpec:
     info: dict[str, dict[str, str]] = field(default_factory=dict)
     default_datatypes: list[int] = field(default_factory=list)
     known_differences: list[KnownDifference] = field(default_factory=list)
-    not_compared: list[str] = field(default_factory=list)
+    not_compared: dict[str, str] = field(default_factory=dict)   # column -> reason ('' = none given)
     report: ReportSpec = field(default_factory=ReportSpec)
+    kind: str = "table"                                  # table | procedure
+    procedure: dict[str, ProcedureSpec] = field(default_factory=dict)
+    windows: list[str] = field(default_factory=list)     # procedure: "shifts" and / or "day"
 
     @property
     def compare_columns(self) -> list[str]:
@@ -159,6 +177,17 @@ def _flag_sides(f) -> dict:
     return dict(f)
 
 
+def _not_compared(value, source: str) -> dict[str, str]:
+    """`not_compared` as {column: reason}. Accepts a list of names or a mapping name -> reason."""
+    if not value:
+        return {}
+    if isinstance(value, dict):
+        return {str(k): "" if v is None else str(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return {str(x): "" for x in value}
+    raise ConfigError(f"{source}: not_compared must be a list of columns or a mapping column -> reason")
+
+
 def parse_table(raw: dict, source: str = "<table>") -> TableSpec:
     columns: dict[str, ColumnSpec] = {}
     for name, c in _need(raw, "columns", "root", source).items():
@@ -169,10 +198,22 @@ def parse_table(raw: dict, source: str = "<table>") -> TableSpec:
             name=name, type=ctype, sql=_need(c, "sql", f"column {name}", source),
             pg=_need(c, "pg", f"column {name}", source),
             id=bool(c.get("id", False)), compare=bool(c.get("compare", True)),
+            round=None if c.get("round") is None else int(c["round"]),
         )
-    for required in ("machine", "datatype"):
-        if required not in columns:
-            raise ConfigError(f"{source}: a '{required}' column is required")
+        if columns[name].round is not None and ctype not in ("decimal", "float"):
+            raise ConfigError(f"{source}: column {name}: 'round' is only allowed on decimal / float columns")
+    if "machine" not in columns:
+        raise ConfigError(f"{source}: a 'machine' column is required")
+    # 'datatype' is optional: aggregated (shift) tables have none. Without it a table cannot
+    # filter or count by datatype.
+    if "datatype" not in columns:
+        if raw.get("default_datatypes"):
+            raise ConfigError(f"{source}: default_datatypes needs a 'datatype' column")
+        bad = [lbl for lbl, dts in ((raw.get("report") or {}).get("counts") or {}).items() if dts]
+        bad += [lbl for lbl, s in ((raw.get("report") or {}).get("sums") or {}).items()
+                if isinstance(s, dict) and s.get("datatypes")]
+        if bad:
+            raise ConfigError(f"{source}: report entries {bad} filter on datatypes, but there is no 'datatype' column")
 
     key = list(_need(raw, "key", "root", source))
     if not key or key[0] != "machine":
@@ -185,14 +226,39 @@ def parse_table(raw: dict, source: str = "<table>") -> TableSpec:
     if time_column not in columns or columns[time_column].type != "datetime":
         raise ConfigError(f"{source}: time_column '{time_column}' must be a datetime column")
 
+    kind = str(raw.get("kind", "table"))
+    if kind not in ("table", "procedure"):
+        raise ConfigError(f"{source}: kind must be 'table' or 'procedure'")
+    procedure: dict[str, ProcedureSpec] = {}
+    windows: list[str] = []
+    if kind == "procedure":
+        for side in SIDES:
+            pr = _need(_need(raw, "procedure", "root", source), side, "procedure", source)
+            call = str(_need(pr, "call", f"procedure.{side}", source))
+            if "{start}" not in call or "{end}" not in call or "{machine}" not in call:
+                raise ConfigError(f"{source}: procedure.{side}.call must use {{start}}, {{end}} and {{machine}}")
+            mcol = str(_need(pr, "machine", f"procedure.{side}", source))
+            if mcol not in MACHINE_CSV_COLUMNS:
+                raise ConfigError(f"{source}: procedure.{side}.machine must be one of {MACHINE_CSV_COLUMNS}")
+            reviewed = _need(pr, "reviewed", f"procedure.{side}", source)
+            if not isinstance(reviewed, dict) or not reviewed:
+                raise ConfigError(f"{source}: procedure.{side}.reviewed must list every routine with its SHA-256")
+            procedure[side] = ProcedureSpec(call=call, machine=mcol, reviewed={str(k): str(v) for k, v in reviewed.items()})
+        windows = [str(w) for w in raw.get("windows") or ["shifts", "day"]]
+        if not windows or any(w not in ("shifts", "day") for w in windows):
+            raise ConfigError(f"{source}: windows must be a list of 'shifts' and / or 'day'")
+
     machine_filter = {}
     machine_key = {}
     for side in SIDES:
-        mf = _need(_need(raw, "machine_filter", "root", source), side, "machine_filter", source)
-        _need(mf, "expr", f"machine_filter.{side}", source)
-        if _need(mf, "csv", f"machine_filter.{side}", source) not in MACHINE_CSV_COLUMNS:
-            raise ConfigError(f"{source}: machine_filter.{side}.csv must be one of {MACHINE_CSV_COLUMNS}")
-        machine_filter[side] = {"expr": str(mf["expr"]), "csv": str(mf["csv"])}
+        if kind == "procedure":
+            machine_filter[side] = {"expr": "", "csv": procedure[side].machine}
+        else:
+            mf = _need(_need(raw, "machine_filter", "root", source), side, "machine_filter", source)
+            _need(mf, "expr", f"machine_filter.{side}", source)
+            if _need(mf, "csv", f"machine_filter.{side}", source) not in MACHINE_CSV_COLUMNS:
+                raise ConfigError(f"{source}: machine_filter.{side}.csv must be one of {MACHINE_CSV_COLUMNS}")
+            machine_filter[side] = {"expr": str(mf["expr"]), "csv": str(mf["csv"])}
         mk = _need(_need(raw, "machine_key", "root", source), side, "machine_key", source)
         if mk not in MACHINE_CSV_COLUMNS:
             raise ConfigError(f"{source}: machine_key.{side} must be one of {MACHINE_CSV_COLUMNS}")
@@ -256,8 +322,9 @@ def parse_table(raw: dict, source: str = "<table>") -> TableSpec:
         name=str(_need(raw, "name", "root", source)),
         label=str(raw.get("label", raw["name"])),
         order=int(raw.get("order", 99)),
-        from_clause={s: _need(_need(raw, s, "root", source), "from", s, source) for s in SIDES},
-        source_id={s: _need(raw[s], "source_id", s, source) for s in SIDES},
+        from_clause={s: "" if kind == "procedure" else _need(_need(raw, s, "root", source), "from", s, source)
+                     for s in SIDES},
+        source_id={s: "" if kind == "procedure" else _need(raw[s], "source_id", s, source) for s in SIDES},
         key=key,
         columns=columns,
         time_column=time_column,
@@ -268,8 +335,11 @@ def parse_table(raw: dict, source: str = "<table>") -> TableSpec:
         info=info,
         default_datatypes=[int(x) for x in raw.get("default_datatypes") or []],
         known_differences=known,
-        not_compared=[str(x) for x in raw.get("not_compared") or []],
+        not_compared=_not_compared(raw.get("not_compared"), source),
         report=report,
+        kind=kind,
+        procedure=procedure,
+        windows=windows,
     )
 
 

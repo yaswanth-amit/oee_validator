@@ -77,8 +77,9 @@ def invalid_records(spec: TableSpec, side: str, df: pl.DataFrame,
                     masters: dict[str, set[str]] | None = None, strict: bool = True) -> pl.DataFrame:
     """Records a side rejected (rawdata status) or whose codes do not resolve (autodata)."""
     tc = spec.time_column
+    datatype = pl.col("datatype") if "datatype" in df.columns else pl.lit(None, dtype=pl.String).alias("datatype")
     base = [pl.lit(side).alias("side"), pl.col("machine_name").alias("machine"), pl.col(tc).alias("time"),
-            pl.col("datatype"), pl.col(SOURCE_ID).cast(pl.String).alias("source_id"), pl.col("machine_order")]
+            datatype, pl.col(SOURCE_ID).cast(pl.String).alias("source_id"), pl.col("machine_order")]
     parts = []
     st = spec.report.status
     if st:
@@ -142,12 +143,13 @@ def table_metrics(result: TableResult, machines: pl.DataFrame,
         defs.append((label, {s: (pl.col(f"info__{f['info']}") == str(f["value"])).sum()
                              for s, f in per_side.items()}))
     for label, s in spec.report.sums.items():
-        filt = _dt_filter(s.get("datatypes"))
         if "column" in s:
-            e = pl.col(s["column"]).cast(pl.Float64, strict=False).filter(filt).sum()
+            e = pl.col(s["column"]).cast(pl.Float64, strict=False)
         else:
             a, b = s["duration"]
-            e = ((_parse_time(b) - _parse_time(a)).dt.total_microseconds() / 1_000_000).filter(filt).sum()
+            e = (_parse_time(b) - _parse_time(a)).dt.total_microseconds() / 1_000_000
+        # no datatype filter: sum every row (filtering on a literal True does not broadcast in group_by)
+        e = (e.filter(_dt_filter(s["datatypes"])) if s.get("datatypes") else e).sum()
         defs.append((label, both(e.round(3))))
 
     rows = []

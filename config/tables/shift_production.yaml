@@ -1,0 +1,139 @@
+# shift_production: dbo.ShiftProductionDetails (SQL Server)
+#              <->  analytics_historic.shift_production_down_details (Postgres)
+#
+# One row per machine, shift, component, operation, operator, work order and heat code.
+# Both sides store business ids (machine name, component id, operator id), not interface ids.
+# SQL Server: dbo.s_Push_Prodn_Down_ShiftAggregation (called by s_GetAutoShiftAggregation).
+# Postgres:   etl.load_agg_prod_summary_from_autodata (scheduled, adds to an existing row) and
+#             etl.fn_reload_agg_prod_summary_from_autodata (re-aggregation, overwrites); same formulas.
+# Mapped and traced on 2026-11-12 (AMIT-SERVER-QA/TPM_PGSQL vs tpm_baseline_qa).
+# Only columns that hold the same quantity on both sides are mapped; everything else is
+# listed under not_compared with the reason.
+
+name: shift_production
+order: 3
+label: "shift_production  -  dbo.ShiftProductionDetails  vs  analytics_historic.shift_production_down_details"
+
+sqlserver:
+  from: "dbo.ShiftProductionDetails p"
+  source_id: "p.ID"
+
+postgres:
+  from: "analytics_historic.shift_production_down_details p"
+  source_id: "p.id"
+
+# A shift row belongs to a machines.csv row when its shift starts inside the logical day
+# [logical_day_start, logical_day_end). With a 06:00 logical day that is shifts A, B and C.
+time_column: shift_start
+
+# SQL Server keeps the machine *name* here; Postgres is filtered on the iot id (indexed).
+machine_filter:
+  sqlserver: {expr: "p.MachineID", csv: machine_name}
+  postgres:  {expr: "p.machine_iot_id", csv: postgres_iot_id}
+
+machine_key:
+  sqlserver: machine_name
+  postgres: machine_name
+
+datetime_precision: sqlserver_datetime
+
+key: [machine, shift_start, component, operation, operator, work_order_number, heat_code]
+
+columns:
+  machine:            {type: str,      sql: "p.MachineID",    pg: "p.machine_id"}
+  shift_start:        {type: datetime, sql: "p.ShiftStart",   pg: "p.shift_start_time"}
+  shift_end:          {type: datetime, sql: "p.ShiftEnd",     pg: "p.shift_end_time"}
+  production_date:    {type: datetime, sql: "p.pDate",        pg: "p.production_date"}
+  shift:              {type: str,      sql: "p.Shift",        pg: "p.shift_name"}
+  plant:              {type: str,      sql: "p.PlantID",      pg: "p.plant_id"}
+  group:              {type: str,      sql: "p.GroupID",      pg: "p.group_id"}
+  component:          {type: str,      sql: "p.ComponentID",  pg: "p.component_id"}
+  operation:          {type: int,      sql: "p.OperationNo",  pg: "p.operation_number"}
+  operator:           {type: str,      sql: "p.OperatorID",   pg: "p.operator_id"}
+  work_order_number:  {type: str,      sql: "p.WorkOrderNumber", pg: "p.work_order_number"}
+  heat_code:          {type: str,      sql: "p.HeatCode",     pg: "p.heat_code"}
+  sub_operation:      {type: int,      sql: "p.SubOperation", pg: "p.sub_operation_number"}
+
+  # quantities: SUM(parts) / sub-operations over cycles that end in the shift (both sides);
+  # accepted = production minus rejections and marked-for-rework
+  production_qty:     {type: decimal,  sql: "p.Prod_Qty",          pg: "p.production_quantity"}
+  accepted_parts:     {type: decimal,  sql: "p.AcceptedParts",     pg: "p.accepted_parts_quantity"}
+  rework_performed:   {type: int,      sql: "p.Rework_Performed",  pg: "p.rework_performed_count"}
+  marked_for_rework:  {type: int,      sql: "p.Marked_for_Rework", pg: "p.marked_for_rework_count"}
+
+  # actual times (s)
+  # Sum_of_ActCycleTime: cycle span clipped to the shift, minus in-cycle downs (both sides).
+  sum_cycle_time:        {type: decimal, sql: "p.Sum_of_ActCycleTime",     pg: "p.total_actual_cycle_time"}
+  # Type12 and min/max: SQL Server counts the whole cycle in the shift where it ends and divides
+  # min/max by parts per cycle; Postgres clips the cycle at the shift start and does not divide.
+  # These are known porting differences - kept compared so they stay visible.
+  machining_time_type12: {type: decimal, sql: "p.ActMachiningTime_Type12", pg: "p.actual_machining_time_type12"}
+  load_unload_type12:    {type: decimal, sql: "p.ActLoadUnload_Type12",    pg: "p.actual_load_unload_time_type12"}
+  max_machining_time:    {type: decimal, sql: "p.MaxMachiningTime",        pg: "p.max_machining_time"}
+  min_machining_time:    {type: decimal, sql: "p.MinMachiningTime",        pg: "p.min_machining_time"}
+  max_load_unload_time:  {type: decimal, sql: "p.MaxLoadUnloadTime",       pg: "p.max_load_unload_time"}
+  min_load_unload_time:  {type: decimal, sql: "p.MinLoadUnloadTime",       pg: "p.min_load_unload_time"}
+
+  # Planned downtime inside production time. Filled only when the "ignore PDT" setting is on
+  # (SQL Server Ignore_Ptime_4m_PLD, Postgres utilized_time); otherwise SQL Server leaves NULL
+  # and Postgres writes 0, so NULL and 0 are the same value here.
+  planned_downtime:    {type: decimal, sql: "COALESCE(p.PDT, 0)", pg: "COALESCE(p.production_planned_downtime, 0)"}
+
+  # master-data values copied into the row
+  std_machining_time:  {type: decimal, sql: "p.CO_StdMachiningTime", pg: "p.standard_machining_time"}
+  std_load_unload:     {type: decimal, sql: "p.CO_StdLoadUnload",    pg: "p.standard_load_unload_time"}
+  price:               {type: decimal, sql: "p.Price",               pg: "p.price"}
+  machine_hour_rate:   {type: decimal, sql: "p.mchrrate",            pg: "p.machine_hour_rate"}
+  incentive_time:      {type: decimal, sql: "p.IncentiveTime",       pg: "p.incentive_time"}
+  # Copied from the machine master: SQL Server machineinformation holds NULL, Postgres ''.
+  # NULL and '' are treated as the same (no owner).
+  machine_owner:       {type: str, sql: "COALESCE(p.MachinewiseOwner, '')", pg: "COALESCE(p.machine_owner, '')"}
+  critical_machine:    {type: bool,    sql: "p.CriticalMachineEnabled", pg: "p.is_critical_machine"}
+
+# Shown for investigation only, never compared.
+info:
+  sqlserver:
+    updated_by: "p.UpdatedBy"
+    updated_at: "p.UpdatedTS"
+  postgres:
+    shift_id: "p.shift_id"
+    cn: "p.cn"
+    net_downtime: "p.net_downtime"
+    management_loss: "p.management_loss"
+    operator_loss: "p.operator_loss"
+    total_minor_downtime: "p.total_minor_downtime"
+    down_planned_downtime: "p.down_planned_downtime"
+    updated_by: "p.updated_by"
+    updated_at: "p.updated_at"
+
+# Not mapped, with the reason. Every report lists these.
+not_compared:
+  sum_load_unload: "SQL Server never assigns Sum_of_ActLoadUnload (always NULL); Postgres fills total_actual_load_unload_time"
+  kwh: "Postgres writers have kilowatt_hours commented out (always NULL); SQL Server fills KWH from autodata energy"
+  energy_consumption: "Postgres writers have energy_consumption commented out (always NULL); SQL Server fills it from tcs_energyconsumption"
+  spindle_run_time: "Postgres writers have spindle_run_time commented out; SQL Server fills it only from SpindleRunTimeDetails_LnT"
+  repeat_cycles: "Not written by either aggregation (SQL Server column default 0; Postgres only via the job-card edit)"
+  dummy_cycles: "Not written by the Postgres aggregation (only via the job-card edit)"
+  finished_operation: "Postgres finished_operation_flag is read from a staging column that is never filled (always NULL) - raised as a Postgres bug"
+  cn: "Postgres only (sum of standard cycle time x parts); SQL Server computes CN in its reports"
+  net_downtime: "Postgres only; SQL Server keeps downtime in ShiftDownTimeDetails (checked with that table)"
+  management_loss: "Postgres only; SQL Server keeps downtime in ShiftDownTimeDetails (checked with that table)"
+  operator_loss: "Postgres only; SQL Server keeps downtime in ShiftDownTimeDetails (checked with that table)"
+  total_minor_downtime: "Postgres only; SQL Server keeps downtime in ShiftDownTimeDetails (checked with that table)"
+  down_planned_downtime: "Postgres only; SQL Server keeps downtime in ShiftDownTimeDetails (checked with that table)"
+  management_loss_planned_downtime: "Postgres only"
+  operator_loss_planned_downtime: "Postgres only"
+  count_planned_downtime: "Postgres only"
+  target: "Postgres only; not written by either Postgres aggregation"
+  updated_by: "Audit column; values differ by design ('pct' vs 'agg_service' / 're_agg_service')"
+  updated_at: "Audit column; time of aggregation"
+
+known_differences: []
+
+report:
+  sums:
+    "Sum production qty":        {column: production_qty}
+    "Sum accepted parts":        {column: accepted_parts}
+    "Sum cycle time (s)":        {column: sum_cycle_time}
+    "Sum machining type12 (s)":  {column: machining_time_type12}
+    "Sum load/unload type12 (s)": {column: load_unload_type12}

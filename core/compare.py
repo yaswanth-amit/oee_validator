@@ -231,7 +231,8 @@ def compare_sides(spec: TableSpec, side_sql: pl.DataFrame, side_pg: pl.DataFrame
                      .rename({"known_reason": "reason", "result": "side"}))
     known_summary = pl.DataFrame({"reason": [kd.reason for kd in spec.known_differences],
                                   "side": [ONLY_SQL if kd.side == "sqlserver" else ONLY_PG
-                                           for kd in spec.known_differences]}).join(
+                                           for kd in spec.known_differences]},
+                                 schema={"reason": pl.String, "side": pl.String}).join(
         known_summary, on=["reason", "side"], how="left").with_columns(pl.col("records").fill_null(0))
 
     totals = {r: records.filter(pl.col("result") == r).height for r in RESULTS}

@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 import openpyxl
@@ -595,3 +595,195 @@ def test_datatypes_argument():
 def test_dotenv_unquote(v, expected):
     from oee_validator.core.config import _unquote
     assert _unquote(v) == expected
+
+
+# --------------------------------------------------------------------------- shift_production (no datatype)
+
+SHIFT = SPECS["shift_production"]
+
+
+def shift_row(i: int, **kw) -> dict:
+    start = datetime(2026, 10, 1, 6 + 8 * (i % 3))
+    r = {c: None for c in SHIFT.columns}
+    r.update({SOURCE_ID: i, "machine": "Machine-01", "shift_start": start, "shift_end": start + timedelta(hours=8),
+              "production_date": datetime(2026, 10, 1), "shift": "Shift-A", "plant": "P", "group": "G",
+              "component": "C1", "operation": 20, "operator": "159", "work_order_number": "0", "heat_code": "0",
+              "sub_operation": 1, "production_qty": 10.0, "accepted_parts": 10.0, "sum_cycle_time": 1200.0,
+              "max_machining_time": 61.5, "critical_machine": False})
+    r.update(kw)
+    return r
+
+
+def shift_pg(row: dict, **kw) -> dict:
+    """Postgres driver style: numeric -> Decimal with 5 places, bool flags."""
+    r = dict(row)
+    for c, col in SHIFT.columns.items():
+        if col.type == "decimal" and isinstance(r.get(c), float):
+            r[c] = Decimal(f"{r[c]:.5f}")
+    r.update(kw)
+    return r
+
+
+def test_shift_table_has_no_datatype_and_filters_machine_by_name():
+    assert "datatype" not in SHIFT.columns
+    sql, params = build_select(SHIFT, "sqlserver", ["Machine-01"], WINDOW, [], ALIASES)
+    assert "(p.MachineID) IN (?)" in sql and "(p.ShiftStart) >= ?" in sql and params[0] == "Machine-01"
+    sql, params = build_select(SHIFT, "postgres", ["1"], WINDOW, [], ALIASES)
+    assert "(p.machine_iot_id) IN (%s)" in sql and "datatype" not in sql
+    with pytest.raises(ValueError, match="no datatype column"):
+        build_select(SHIFT, "sqlserver", ["Machine-01"], WINDOW, [1], ALIASES)
+
+
+def test_shift_rows_float_vs_numeric_match():
+    rows = [shift_row(1), shift_row(2, component="C2")]
+    tr = run_auto(rows, [shift_pg(r) for r in rows], spec=SHIFT)
+    assert verdict(tr) == PASS
+    assert tr.result.totals[IDENTICAL] == 2
+    counts = {r["metric"]: (r["sqlserver"], r["postgres"]) for r in tr.metrics.counts.filter(pl.col("machine") == "Machine-01").iter_rows(named=True)}
+    assert counts["Sum production qty"] == ("20", "20")
+
+
+def test_shift_rows_report_value_and_null_differences():
+    sql = [shift_row(1, min_machining_time=81.0, machining_time_type12=19417.0)]
+    pg = [shift_pg(shift_row(1, min_machining_time=70.0, machining_time_type12=19364.0))]
+    tr = run_auto(sql, pg, spec=SHIFT)
+    assert verdict(tr) == FAIL
+    rec = tr.result.records.row(0, named=True)
+    assert rec["result"] == DIFFERENT
+    assert set(rec["diff_columns"].split(", ")) == {"min_machining_time", "machining_time_type12"}
+
+
+def test_shift_extra_postgres_row_is_one_sided():
+    tr = run_auto([shift_row(1)], [shift_pg(shift_row(1)), shift_pg(shift_row(2, production_qty=0.0))], spec=SHIFT)
+    assert tr.result.totals[ONLY_PG] == 1 and verdict(tr) == FAIL
+
+
+def test_config_without_datatype_rejects_datatype_report_filters():
+    raw = {"name": "x", "sqlserver": {"from": "a", "source_id": "a.id"}, "postgres": {"from": "b", "source_id": "b.id"},
+           "key": ["machine", "t"], "time_column": "t",
+           "machine_filter": {s: {"expr": "m", "csv": "machine_name"} for s in ("sqlserver", "postgres")},
+           "machine_key": {"sqlserver": "machine_name", "postgres": "machine_name"},
+           "columns": {"machine": {"type": "str", "sql": "m", "pg": "m"}, "t": {"type": "datetime", "sql": "t", "pg": "t"}},
+           "report": {"counts": {"Cycles": [1]}}}
+    with pytest.raises(ConfigError, match="no 'datatype' column"):
+        parse_table(raw)
+    raw["report"] = {}
+    assert parse_table(raw).name == "x"
+
+
+def test_not_compared_carries_reasons():
+    assert "sum_load_unload" not in SHIFT.columns and "finished_operation" not in SHIFT.columns
+    assert "never assigns" in SHIFT.not_compared["sum_load_unload"]
+    assert AUTO.not_compared and all(v == "" for v in AUTO.not_compared.values())   # list form still accepted
+
+
+def test_shift_down_spec_and_bool_flags_from_tinyint():
+    down = SPECS["shift_down"]
+    assert down.key == ["machine", "shift_start", "start_time"] and "datatype" not in down.columns
+    col = down.columns["ml_flag"]
+    sql = canonical_series([1, 0, None], col, "sqlserver", ALIASES, True).to_list()
+    pg = canonical_series([True, False, None], col, "postgres", ALIASES, True).to_list()
+    assert sql == pg == ["true", "false", None]
+
+
+# --------------------------------------------------------------------------- cockpit (report procedures)
+
+class _FakeCursor:
+    def __init__(self, log, cols, rows, fail=False):
+        self.log, self.cols, self.rows, self.fail = log, cols, rows, fail
+        self.description = None
+
+    def execute(self, sql, params=()):
+        self.log.append(sql)
+        if self.fail and "cockpit" in sql.lower():
+            raise RuntimeError("boom")
+        if "s_GetCockpitData" in sql or "get_cockpit_details" in sql:
+            self.description = [(c,) for c in self.cols]
+
+    def fetchall(self):
+        return self.rows
+
+    def nextset(self):
+        return False
+
+    def close(self):
+        self.log.append("close")
+
+
+class _FakeConn:
+    def __init__(self, cols, rows, fail=False):
+        self.log, self.autocommit = [], True
+        self.cols, self.rows, self.fail = cols, rows, fail
+
+    def cursor(self):
+        return _FakeCursor(self.log, self.cols, self.rows, self.fail)
+
+    def rollback(self):
+        self.log.append("ROLLBACK")
+
+
+def test_cockpit_spec_maps_every_sql_server_column():
+    from oee_validator.core.config import load_table_specs
+    cock = load_table_specs()["cockpit"]
+    assert cock.kind == "procedure" and cock.windows == ["shifts", "day"]
+    sql_cols = {c.sql for c in cock.columns.values()} - {"window_name", "window_start", "window_end"}
+    assert len(sql_cols) == 21                                   # 30 returned; 8 colour thresholds + Remarks shown only
+    assert "ae_green" not in cock.columns and "ae_green" in cock.not_compared
+    assert cock.info["sqlserver"]["AEGreen"] == "AEGreen"
+    assert cock.columns["quality_efficiency"].round == 2
+
+
+def test_procedure_calls_are_always_rolled_back():
+    from oee_validator.core.db import call_procedure
+    cock = SPECS["cockpit"]
+    sql = _FakeConn(["MachineID", "CN"], [("CNC-01", 1.0)])
+    out = call_procedure(sql, "sqlserver", cock.procedure["sqlserver"].call, T0, T0, "CNC-01")
+    assert out == {"MachineID": ["CNC-01"], "CN": [1.0]}
+    assert sql.log[-1] == "ROLLBACK" and sql.autocommit is True
+    pg = _FakeConn(["machine_id"], [("CNC-01",)], fail=True)
+    with pytest.raises(RuntimeError):
+        call_procedure(pg, "postgres", cock.procedure["postgres"].call, T0, T0, "CNC-01")
+    assert pg.log[0] == "BEGIN READ WRITE" and "ROLLBACK" in pg.log      # rolled back on error too
+
+
+def test_shift_windows_inside_the_logical_day():
+    from oee_validator.core.db import shift_windows
+    shifts = {"name": ["Shift-A", "Shift-B", "Shift-C"],
+              "from_time": [datetime(1900, 1, 1, 6), datetime(1900, 1, 1, 14), datetime(1900, 1, 1, 22)],
+              "to_time": [datetime(1900, 1, 1, 14), datetime(1900, 1, 1, 22), datetime(1900, 1, 1, 6)],
+              "from_day": [0, 0, 0], "to_day": [0, 0, 1]}
+    w = shift_windows(shifts, Window(datetime(2026, 11, 5, 6), datetime(2026, 11, 6, 6)))
+    assert [(n, s.hour, e.day) for n, s, e in w] == [("Shift-A", 6, 5), ("Shift-B", 14, 5), ("Shift-C", 22, 6)]
+
+
+def test_cockpit_rounding_projection_and_unmapped_columns():
+    from oee_validator.core.pipeline import _stack, project, unmapped_columns
+    cock = SPECS["cockpit"]
+    m = machines((("CNC-01", "1001", "1001", "1"),))
+    sql_row = {c.sql: None for c in cock.columns.values()}
+    pg_row = {c.pg: None for c in cock.columns.values()}
+    sql_row.update(MachineID="CNC-01", QualityEfficiency=91.37931034482759, ReturnPerHourTOTAL=19.875, CN=20670.0)
+    pg_row.update(machine_id="CNC-01", quality_efficiency=Decimal("90.570"), return_per_hour_total=Decimal("19.880"),
+                  cn=Decimal("20670.000"), brand_new_column=1)
+    w = (datetime(2026, 11, 5, 6), datetime(2026, 11, 5, 14))
+    raw_sql = _stack([("Shift-A", *w, {k: [v] for k, v in sql_row.items() if k not in ("window_name", "window_start", "window_end")})])
+    raw_pg = _stack([("Shift-A", *w, {k: [v] for k, v in pg_row.items() if k not in ("window_name", "window_start", "window_end")})])
+    notes = unmapped_columns(cock, {"sqlserver": raw_sql, "postgres": raw_pg})
+    assert len(notes) == 1 and "brand_new_column" in notes[0]
+    tr = compare_table(cock, project(cock, "sqlserver", raw_sql), project(cock, "postgres", raw_pg), m, ALIASES)
+    rec = tr.result.records.row(0, named=True)
+    assert rec["result"] == DIFFERENT and rec["diff_columns"] == "quality_efficiency"
+    assert (rec["quality_efficiency_sql"], rec["quality_efficiency_pg"]) == ("91.38", "90.57")
+    assert rec["return_per_hour_total_ok"] and rec["cn_ok"]                 # 19.875 -> 19.88, 20670.0 == 20670.000
+
+
+def test_changed_procedure_definition_refuses_the_run(monkeypatch):
+    from oee_validator.core import pipeline
+    from oee_validator.core.config import ConfigError
+    cock = SPECS["cockpit"]
+    monkeypatch.setattr(pipeline, "routine_fingerprints",
+                        lambda conn, side, names: {n: ("0" * 64 if n == "dbo.s_GetCockpitData" else cock.procedure[side].reviewed[n])
+                                                   for n in names})
+    with pytest.raises(ConfigError, match="dbo.s_GetCockpitData.*changed since it was reviewed"):
+        pipeline.check_reviewed(pipeline.Connections(None, None), {"cockpit": cock})
+    pipeline.check_reviewed(pipeline.Connections(None, None), {"rawdata": RAW})     # table checks unaffected

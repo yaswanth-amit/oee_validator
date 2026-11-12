@@ -46,6 +46,21 @@ def load_machines(path: str | Path) -> pl.DataFrame:
     if not path.exists():
         raise MachineListError([f"file not found: {path}"])
     df = pl.read_csv(path, infer_schema=False, encoding="utf8-lossy")
+    return check_machines(df)
+
+
+def machines_frame(rows: list[tuple[str, datetime, datetime]]) -> pl.DataFrame:
+    """The machine list from the UI: (machine_name, logical_day_start, logical_day_end) per job.
+    Goes through exactly the same checks as machines.csv."""
+    df = pl.DataFrame([(n, f"{s:%Y-%m-%d %H:%M:%S}", f"{e:%Y-%m-%d %H:%M:%S}") for n, s, e in rows],
+                      schema=list(CSV_COLUMNS), orient="row")
+    return check_machines(df, line_word="row", first_line=1, empty="no machine and logical day selected")
+
+
+def check_machines(df: pl.DataFrame, line_word: str = "line", first_line: int = 2,
+                   empty: str = "the file has no machines") -> pl.DataFrame:
+    """Check a machine list (all columns text) and parse the logical days. Returns one row per
+    job, in input order. Extra columns (such as the old id columns) are ignored."""
     df = df.rename({c: c.strip().lower() for c in df.columns})
     problems = []
     missing = [c for c in CSV_COLUMNS if c not in df.columns]
@@ -56,23 +71,23 @@ def load_machines(path: str | Path) -> pl.DataFrame:
             .with_columns(pl.col(c).str.strip_chars() for c in CSV_COLUMNS)
             .filter(pl.any_horizontal(pl.col(c).is_not_null() & (pl.col(c) != "") for c in CSV_COLUMNS)))
     if df.height == 0:
-        raise MachineListError(["the file has no machines"])
+        raise MachineListError([empty])
 
     starts, ends = [], []
-    for i, row in enumerate(df.iter_rows(named=True), start=2):
+    for i, row in enumerate(df.iter_rows(named=True), start=first_line):
         for c in CSV_COLUMNS:
             if not row[c]:
-                problems.append(f"line {i}: '{c}' is empty")
+                problems.append(f"{line_word} {i}: '{c}' is empty")
         parsed = {}
         for c in WINDOW_CSV_COLUMNS:
             if row[c]:
                 try:
                     parsed[c] = parse_timestamp(row[c])
                 except ValueError:
-                    problems.append(f"line {i}: {c} {row[c]!r} is not a timestamp (use YYYY-MM-DD HH:MM:SS)")
+                    problems.append(f"{line_word} {i}: {c} {row[c]!r} is not a timestamp (use YYYY-MM-DD HH:MM:SS)")
         s, e = parsed.get(WINDOW_CSV_COLUMNS[0]), parsed.get(WINDOW_CSV_COLUMNS[1])
         if s and e and e <= s:
-            problems.append(f"line {i}: logical_day_end {row[WINDOW_CSV_COLUMNS[1]]} is not after "
+            problems.append(f"{line_word} {i}: logical_day_end {row[WINDOW_CSV_COLUMNS[1]]} is not after "
                             f"logical_day_start {row[WINDOW_CSV_COLUMNS[0]]}")
         starts.append(s)
         ends.append(e)

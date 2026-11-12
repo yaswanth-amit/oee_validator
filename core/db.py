@@ -1,15 +1,20 @@
 """Read-only database access and query building for both sides.
 
-Only SELECT statements are ever sent. Postgres sessions are opened read-only
+Table comparisons send only SELECT statements. Postgres sessions are opened read-only
 (default_transaction_read_only). SQL Server has no session-level read-only switch for a
 standalone instance, so a dedicated read-only login is recommended (see README).
+
+Procedure comparisons (kind: procedure, e.g. the cockpit) execute one reviewed report
+procedure per side. Each call runs in its own transaction that is always rolled back, and it is
+refused when the routine's definition differs from the reviewed one (routine_fingerprints).
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from .config import Aliases, TableSpec
 
@@ -163,6 +168,8 @@ def build_where(spec: TableSpec, side: str, machine_ids: list[str], window: Wind
     clauses += wc
     params += wp
     if datatypes:
+        if "datatype" not in spec.columns:
+            raise ValueError(f"{spec.name} has no datatype column, so it cannot be filtered by datatype")
         clauses.append(f"({_expr(spec, 'datatype', side, aliases)}) IN ({', '.join([ph] * len(datatypes))})")
         params += [int(d) for d in datatypes]
     return " WHERE " + "\n  AND ".join(clauses), params
@@ -208,3 +215,102 @@ def fetch_master_set(conn, sql: str) -> set[str]:
     data = fetch(conn, sql)
     col = next(iter(data.values()), [])
     return {str(v).strip().lower() for v in col if v is not None}
+
+
+# --------------------------------------------------------------------------- report procedures
+
+_PROC_TOKEN = re.compile(r"\{(start|end|machine)\}")
+WINDOW_COLUMNS = ("window_name", "window_start", "window_end")     # added to every procedure row
+
+
+def _definition_hash(text: str | None) -> str | None:
+    """SHA-256 of a routine definition, ignoring line endings and trailing spaces."""
+    if text is None:
+        return None
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    norm = "\n".join(line.rstrip() for line in lines).strip()
+    return hashlib.sha256(norm.encode("utf-8")).hexdigest()
+
+
+def routine_fingerprints(conn, side: str, names: list[str]) -> dict[str, str | None]:
+    """Current SHA-256 of each routine definition (None = not found). Postgres names are
+    schema.function; all overloads of the name are hashed together."""
+    out: dict[str, str | None] = {}
+    for name in names:
+        if side == "sqlserver":
+            d = fetch(conn, "SELECT OBJECT_DEFINITION(OBJECT_ID(?)) AS d", [name])["d"]
+        else:
+            schema, _, fn = name.partition(".")
+            d = fetch(conn, "SELECT string_agg(pg_get_functiondef(p.oid), E'\\n' ORDER BY p.oid::regprocedure::text) AS d "
+                            "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+                            "WHERE n.nspname = %s AND p.proname = %s", [schema, fn])["d"]
+        out[name] = _definition_hash(d[0] if d else None)
+    return out
+
+
+def call_procedure(conn, side: str, call: str, start: datetime, end: datetime, machine: str) -> dict[str, list]:
+    """Execute one reviewed report procedure and return its result as {column: [values]}.
+
+    The call runs in its own transaction that is ALWAYS rolled back, so nothing it writes
+    (temp tables, or anything else) persists. SQL Server: the last result set is returned.
+    """
+    ph = "?" if side == "sqlserver" else "%s"
+    params: list = []
+
+    def bind(m: re.Match) -> str:
+        params.append({"start": start, "end": end, "machine": machine}[m.group(1)])
+        return ph
+
+    sql = _PROC_TOKEN.sub(bind, call)
+    cols: list[str] = []
+    rows: list = []
+    if side == "sqlserver":
+        previous = conn.autocommit
+        conn.autocommit = False
+        cur = conn.cursor()
+        try:
+            cur.execute("SET NOCOUNT ON; " + sql, params)
+            while True:
+                if cur.description:
+                    cols, rows = [d[0] for d in cur.description], cur.fetchall()
+                if not cur.nextset():
+                    break
+        finally:
+            try:
+                cur.close()
+            finally:
+                conn.rollback()
+                conn.autocommit = previous
+    else:
+        cur = conn.cursor()
+        try:
+            cur.execute("BEGIN READ WRITE")     # the function builds temp tables; rolled back below
+            cur.execute(sql, params)
+            cols, rows = [d[0] for d in cur.description], cur.fetchall()
+        finally:
+            try:
+                cur.execute("ROLLBACK")
+            finally:
+                cur.close()
+    if not rows:
+        return {c: [] for c in cols}
+    return {c: list(v) for c, v in zip(cols, zip(*rows))}
+
+
+SQL_SHIFTS = ("SELECT ShiftName AS name, FromTime AS from_time, ToTime AS to_time, FromDay AS from_day, "
+              "ToDay AS to_day FROM dbo.shiftdetails WHERE Running = 1 ORDER BY shiftid")
+
+
+def shift_windows(shifts: dict[str, list], window: Window) -> list[tuple[str, datetime, datetime]]:
+    """The shifts (SQL Server dbo.shiftdetails, Running = 1) that start inside the logical day.
+    FromTime / ToTime give the time of day, FromDay / ToDay the day offset."""
+    out = []
+    base = window.start.date()
+    for day in (base - timedelta(days=1), base):
+        for name, ft, tt, fd, td in zip(shifts["name"], shifts["from_time"], shifts["to_time"],
+                                         shifts["from_day"], shifts["to_day"]):
+            start = datetime.combine(day + timedelta(days=int(fd or 0)), ft.time())
+            end = datetime.combine(day + timedelta(days=int(td or 0)), tt.time())
+            if window.start <= start < window.end and end > start:
+                out.append((str(name), start, end))
+    return sorted(set(out), key=lambda w: w[1])

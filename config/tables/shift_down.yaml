@@ -1,0 +1,106 @@
+# shift_down: dbo.ShiftDownTimeDetails (SQL Server)
+#        <->  analytics_historic.shift_down_time_details (Postgres)
+#
+# One row per down record per shift: a down that crosses a shift boundary is split, and each
+# part is clipped to its shift. Both sides store business ids (machine name, down id).
+# SQL Server: dbo.s_Push_Prodn_Down_ShiftAggregation (called by s_GetAutoShiftAggregation).
+# Postgres:   etl.load_agg_prod_summary_from_autodata / etl.fn_reload_agg_prod_summary_from_autodata
+#             (same INSERT INTO analytics_historic.shift_down_time_details in both).
+# Mapped on 2026-11-12 (AMIT-SERVER-QA/TPM_PGSQL vs tpm_baseline_qa).
+# Only columns that hold the same quantity on both sides are mapped; everything else is
+# listed under not_compared with the reason.
+
+name: shift_down
+order: 4
+label: "shift_down  -  dbo.ShiftDownTimeDetails  vs  analytics_historic.shift_down_time_details"
+
+sqlserver:
+  from: "dbo.ShiftDownTimeDetails d"
+  source_id: "d.ID"
+
+postgres:
+  from: "analytics_historic.shift_down_time_details d"
+  source_id: "d.id"
+
+# A row belongs to a machines.csv row when its shift starts inside the logical day.
+time_column: shift_start
+
+machine_filter:
+  sqlserver: {expr: "d.MachineID", csv: machine_name}
+  postgres:  {expr: "d.machine_iot_id", csv: postgres_iot_id}
+
+machine_key:
+  sqlserver: machine_name
+  postgres: machine_name
+
+datetime_precision: sqlserver_datetime
+
+# start_time is the down start clipped to the shift, so it is unique per machine and shift.
+key: [machine, shift_start, start_time]
+
+columns:
+  machine:            {type: str,      sql: "d.MachineID",       pg: "d.machine_id"}
+  shift_start:        {type: datetime, sql: "d.ShiftStart",      pg: "d.shift_start"}
+  shift_end:          {type: datetime, sql: "d.ShiftEnd",        pg: "d.shift_end"}
+  down_date:          {type: datetime, sql: "d.dDate",           pg: "d.down_date"}
+  shift:              {type: str,      sql: "d.Shift",           pg: "d.shift_name"}
+  plant:              {type: str,      sql: "d.PlantID",         pg: "d.plant_id"}
+  group:              {type: str,      sql: "d.GroupID",         pg: "d.group_id"}
+  component:          {type: str,      sql: "d.ComponentID",     pg: "d.component_id"}
+  operation:          {type: int,      sql: "d.OperationNo",     pg: "d.operation_number"}
+  operator:           {type: str,      sql: "d.OperatorID",      pg: "d.operator_id"}
+  work_order_number:  {type: str,      sql: "d.WorkOrderNumber", pg: "d.work_order_number"}
+  heat_code:          {type: str,      sql: "d.HeatCode",        pg: "d.heat_code"}
+
+  start_time:         {type: datetime, sql: "d.StartTime",       pg: "d.start_time"}
+  end_time:           {type: datetime, sql: "d.EndTime",         pg: "d.end_time"}
+  # Predefined down codes (NO_DATA <-> no_data, ...) are matched by name through aliases.yaml,
+  # as in autodata; every other down id is compared exactly.
+  down_id:            {type: downcode, sql: "d.DownID",          pg: "d.down_id"}
+  # Category name copied from the down-code master (SQL Server downcodeinformation.Catagory,
+  # Postgres master_data.down_category.category_name). Compared exactly, so a spelling
+  # difference in the masters shows up.
+  down_category:      {type: str,      sql: "d.DownCategory",    pg: "d.down_category"}
+  # Down time net of planned downtime, and the planned-downtime part (s).
+  down_time:          {type: int,      sql: "d.DownTime",        pg: "d.down_time"}
+  planned_downtime:   {type: decimal,  sql: "COALESCE(d.PDT, 0)", pg: "COALESCE(d.planned_down_time, 0)"}
+
+  # flags and thresholds copied from the down-code master
+  ml_flag:            {type: bool,     sql: "d.ML_Flag",           pg: "d.ml_flag"}
+  pe_flag:            {type: bool,     sql: "d.PE_Flag",           pg: "d.pe_flag"}
+  prod_effy:          {type: bool,     sql: "d.prodeffy",          pg: "d.prod_effy"}
+  exclude_from_target: {type: bool,    sql: "d.ExcludeFromTarget", pg: "d.exclude_from_target"}
+  threshold:          {type: decimal,  sql: "d.Threshold",         pg: "d.threshold"}
+  threshold_from_co:  {type: bool,     sql: "d.ThresholdfromCO",   pg: "d.threshold_from_co"}
+  ret_per_machine_hour_flag: {type: bool, sql: "d.RetPerMcHour_Flag", pg: "d.ret_per_machine_hour_flag"}
+  std_setup_time:     {type: decimal,  sql: "d.StdSetupTime",      pg: "d.standard_setup_time"}
+  critical_machine:   {type: bool,     sql: "d.CriticalMachineEnabled", pg: "d.critical_machine_enabled"}
+
+  # free text entered later by users (copied from autodata on both sides)
+  action_taken:       {type: str,      sql: "d.ActionTaken",       pg: "d.action_taken"}
+  remarks:            {type: str,      sql: "d.Remarks",           pg: "d.remarks"}
+
+# Shown for investigation only, never compared.
+info:
+  sqlserver:
+    updated_by: "d.UpdatedBy"
+    updated_at: "d.UpdatedTS"
+  postgres:
+    shift_id: "d.shift_id"
+    down_iot_id: "d.down_iot_id"
+    updated_by: "d.updated_by"
+    updated_at: "d.updated_at"
+
+# Not mapped, with the reason. Every report lists these.
+not_compared:
+  kwh: "Postgres writers do not write kilowatt_hours to shift_down_time_details (always NULL); SQL Server stores KWH"
+  turn_over: "Postgres writers do not write turn_over (always NULL)"
+  updated_by: "Audit column; values differ by design ('pct' vs 'agg_service' / 're_agg_service')"
+  updated_at: "Audit column; time of aggregation"
+
+known_differences: []
+
+report:
+  sums:
+    "Sum down time (s)":         {column: down_time}
+    "Sum planned downtime (s)":  {column: planned_downtime}

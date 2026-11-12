@@ -49,7 +49,8 @@ def render(r: RunResult) -> str:
             ["Run at", f"{r.run_at:%Y-%m-%d %H:%M:%S}  ({r.seconds:,.1f} s)"]]
     for name, t in r.tables.items():
         spec = t.result.spec
-        rows.append([f"{name} datatypes", ", ".join(map(str, t.datatypes)) or "all"])
+        if "datatype" in spec.columns:
+            rows.append([f"{name} datatypes", ", ".join(map(str, t.datatypes)) or "all"])
         rule = window_rule(spec)
         rows.append([f"{name} records selected (SQL Server)", f"`{rule['sqlserver']}`"])
         rows.append([f"{name} records selected (Postgres)", f"`{rule['postgres']}`"])
@@ -58,7 +59,12 @@ def render(r: RunResult) -> str:
                      else "exact (microseconds)"])
         if spec.not_compared:
             rows.append([f"{name} columns not compared", ", ".join(spec.not_compared)])
-    parts.append("## 1. Run info\n\n" + md_table(["Item", "Value"], rows))
+    run_info = "## 1. Run info\n\n" + md_table(["Item", "Value"], rows)
+    for name, t in r.tables.items():
+        reasons = [[c, why] for c, why in t.result.spec.not_compared.items() if why]
+        if reasons:
+            run_info += f"\n\n**{name}: columns not compared**\n\n" + md_table(["Column", "Reason"], reasons)
+    parts.append(run_info)
 
     # 2. verdict
     v = r.verdicts

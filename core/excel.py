@@ -160,10 +160,10 @@ def write_workbook(r: RunResult, path: str | Path, sheet_per_machine: bool = Fal
         spec = t.result.spec
         for c in spec.columns.values():
             cmap.append({"table": name, "column": c.name, "type": c.type, "compared": c.compare,
-                         "pairing_key": c.name in spec.key, "sqlserver": c.sql, "postgres": c.pg})
-        for c in spec.not_compared:
+                         "pairing_key": c.name in spec.key, "sqlserver": c.sql, "postgres": c.pg, "note": ""})
+        for c, why in spec.not_compared.items():
             cmap.append({"table": name, "column": c, "type": "", "compared": False, "pairing_key": False,
-                         "sqlserver": "(not compared)", "postgres": "(not compared)"})
+                         "sqlserver": "(not compared)", "postgres": "(not compared)", "note": why})
     b.frame(pl.DataFrame(cmap), b.name("column_map"), max_width=70)
 
     # ---------------------------------------------------------------- summary sheet

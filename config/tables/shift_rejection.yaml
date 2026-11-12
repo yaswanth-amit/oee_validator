@@ -1,0 +1,103 @@
+# shift_rejection: dbo.ShiftRejectionDetails (SQL Server)
+#             <->  analytics_historic.shift_rejection_details (Postgres)
+#
+# One row per shift-production group (machine, shift, component, operation, operator,
+# work order, heat code) and rejection code, with the summed rejected quantity.
+# SQL Server: dbo.s_Push_Prodn_Down_ShiftAggregation. It inserts
+#             ShiftRejectionDetails(ID, Rejection_Qty, Rejection_Reason) where
+#             ID = the parent dbo.ShiftProductionDetails.ID (not Slno; Slno is the row's own
+#             identity) and Rejection_Reason = rejectioncodeinformation.Rejectionid (the code).
+#             Everything else (machine, shift, component, ...) lives on the parent row.
+# Postgres:   etl.load_agg_prod_summary_from_autodata / etl.fn_reload_agg_prod_summary_from_autodata
+#             write a flat row: rejection_id = rejection_code_information.rejection_id,
+#             rejection_reason = rejection_description (or rejection_type).
+# Mapped on 2026-11-12 (AMIT-SERVER-QA/TPM_PGSQL vs tpm_baseline_qa).
+# Only columns that hold the same quantity on both sides are mapped; everything else is
+# listed under not_compared with the reason.
+
+name: shift_rejection
+order: 6
+label: "shift_rejection  -  dbo.ShiftRejectionDetails  vs  analytics_historic.shift_rejection_details"
+
+sqlserver:
+  # INNER JOIN: a rejection row without its production row cannot be placed in a shift.
+  from: |
+    dbo.ShiftRejectionDetails r
+    INNER JOIN dbo.ShiftProductionDetails p ON p.ID = r.ID
+  source_id: "r.Slno"
+
+postgres:
+  # Postgres stores no shift start on rejection rows. It is taken from the production row of
+  # the same machine, logical day and shift (Postgres writes one for every shift, also with
+  # zero production). LIMIT 1 so several production rows of that shift cannot duplicate it.
+  from: |
+    analytics_historic.shift_rejection_details r
+    LEFT JOIN LATERAL (
+      SELECT p.shift_start_time
+      FROM analytics_historic.shift_production_down_details p
+      WHERE p.machine_iot_id = r.machine_iot_id
+        AND p.production_date = r.production_date
+        AND p.shift_id = r.shift_id
+      ORDER BY p.shift_start_time
+      LIMIT 1
+    ) s ON true
+  source_id: "r.id"
+
+# A row belongs to a machines.csv row when its shift starts inside the logical day.
+time_column: shift_start
+
+machine_filter:
+  sqlserver: {expr: "p.MachineID", csv: machine_name}
+  postgres:  {expr: "r.machine_iot_id", csv: postgres_iot_id}
+
+machine_key:
+  sqlserver: machine_name
+  postgres: machine_name
+
+datetime_precision: sqlserver_datetime
+
+key: [machine, shift_start, component, operation, operator, work_order_number, heat_code, rejection_code]
+
+columns:
+  machine:            {type: str,      sql: "p.MachineID",       pg: "r.machine_id"}
+  shift_start:        {type: datetime, sql: "p.ShiftStart",      pg: "s.shift_start_time"}
+  production_date:    {type: datetime, sql: "p.pDate",           pg: "r.production_date"}
+  shift:              {type: str,      sql: "p.Shift",           pg: "r.shift_name"}
+  plant:              {type: str,      sql: "p.PlantID",         pg: "r.plant_id"}
+  group:              {type: str,      sql: "p.GroupID",         pg: "r.group_id"}
+  component:          {type: str,      sql: "p.ComponentID",     pg: "r.component_id"}
+  operation:          {type: int,      sql: "p.OperationNo",     pg: "r.operation_number"}
+  operator:           {type: str,      sql: "p.OperatorID",      pg: "r.operator_id"}
+  work_order_number:  {type: str,      sql: "p.WorkOrderNumber", pg: "r.work_order_number"}
+  heat_code:          {type: str,      sql: "p.HeatCode",        pg: "r.heat_code"}
+
+  # The rejection code. SQL Server keeps it in the column named Rejection_Reason.
+  rejection_code:     {type: str,      sql: "r.Rejection_Reason", pg: "r.rejection_id"}
+  rejection_qty:      {type: int,      sql: "r.Rejection_Qty",    pg: "r.rejection_quantity"}
+
+# Shown for investigation only, never compared.
+info:
+  sqlserver:
+    shift_production_id: "r.ID"
+    updated_by: "r.UpdatedBy"
+    updated_at: "r.UpdatedTS"
+  postgres:
+    shift_id: "r.shift_id"
+    rejection_iot_id: "r.rejection_iot_id"
+    rejection_reason: "r.rejection_reason"
+    rejected_timestamp: "r.rejected_timestamp"
+    updated_by: "r.updated_by"
+    updated_at: "r.updated_at"
+
+# Not mapped, with the reason. Every report lists these.
+not_compared:
+  rejection_reason: "Postgres only: the code's description from rejection_code_information. SQL Server's Rejection_Reason holds the code itself and is compared as rejection_code"
+  rejected_timestamp: "Postgres only: latest rejection entry time of the group; SQL Server does not store it"
+  updated_by: "Audit column; values differ by design ('PCT' vs 'agg_service' / 're_agg_service')"
+  updated_at: "Audit column; time of aggregation"
+
+known_differences: []
+
+report:
+  sums:
+    "Sum rejected qty":  {column: rejection_qty}

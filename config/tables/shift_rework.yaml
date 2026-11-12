@@ -1,0 +1,97 @@
+# shift_rework: dbo.ShiftReworkDetails (SQL Server)
+#          <->  analytics_historic.shift_rework_details (Postgres)
+#
+# Marked-for-rework quantities: one row per shift-production group (machine, shift, component,
+# operation, operator, work order, heat code) and rework code.
+# SQL Server: dbo.s_Push_Prodn_Down_ShiftAggregation. It inserts
+#             ShiftReworkDetails(ID, Rework_Qty, Rework_Reason) where ID = the parent
+#             dbo.ShiftProductionDetails.ID and Rework_Reason = Reworkinformation.Reworkid (the
+#             code), from AutodataRejections rows with flag 'MarkedforRework'. It also sets
+#             ShiftProductionDetails.Marked_for_Rework.
+# Postgres:   etl.load_agg_prod_summary_from_autodata / etl.fn_reload_agg_prod_summary_from_autodata
+#             write a flat row: rework_id = rework_information.rework_id,
+#             rework_reason = rework_description (or rework_id); they add the quantity to
+#             shift_production_down_details.marked_for_rework_count.
+# Mapped on 2026-11-12 (AMIT-SERVER-QA/TPM_PGSQL vs tpm_baseline_qa). Neither side had rework
+# rows yet, so the mapping is checked against the writers only, not against data.
+
+name: shift_rework
+order: 7
+label: "shift_rework  -  dbo.ShiftReworkDetails  vs  analytics_historic.shift_rework_details"
+
+sqlserver:
+  # INNER JOIN: a rework row without its production row cannot be placed in a shift.
+  from: |
+    dbo.ShiftReworkDetails r
+    INNER JOIN dbo.ShiftProductionDetails p ON p.ID = r.ID
+  source_id: "r.Slno"
+
+postgres:
+  # Shift start taken from the production row of the same machine, logical day and shift
+  # (see shift_rejection.yaml).
+  from: |
+    analytics_historic.shift_rework_details r
+    LEFT JOIN LATERAL (
+      SELECT p.shift_start_time
+      FROM analytics_historic.shift_production_down_details p
+      WHERE p.machine_iot_id = r.machine_iot_id
+        AND p.production_date = r.production_date
+        AND p.shift_id = r.shift_id
+      ORDER BY p.shift_start_time
+      LIMIT 1
+    ) s ON true
+  source_id: "r.id"
+
+time_column: shift_start
+
+machine_filter:
+  sqlserver: {expr: "p.MachineID", csv: machine_name}
+  postgres:  {expr: "r.machine_iot_id", csv: postgres_iot_id}
+
+machine_key:
+  sqlserver: machine_name
+  postgres: machine_name
+
+datetime_precision: sqlserver_datetime
+
+key: [machine, shift_start, component, operation, operator, work_order_number, heat_code, rework_code]
+
+columns:
+  machine:            {type: str,      sql: "p.MachineID",       pg: "r.machine_id"}
+  shift_start:        {type: datetime, sql: "p.ShiftStart",      pg: "s.shift_start_time"}
+  production_date:    {type: datetime, sql: "p.pDate",           pg: "r.production_date"}
+  shift:              {type: str,      sql: "p.Shift",           pg: "r.shift_name"}
+  plant:              {type: str,      sql: "p.PlantID",         pg: "r.plant_id"}
+  group:              {type: str,      sql: "p.GroupID",         pg: "r.group_id"}
+  component:          {type: str,      sql: "p.ComponentID",     pg: "r.component_id"}
+  operation:          {type: int,      sql: "p.OperationNo",     pg: "r.operation_number"}
+  operator:           {type: str,      sql: "p.OperatorID",      pg: "r.operator_id"}
+  work_order_number:  {type: str,      sql: "p.WorkOrderNumber", pg: "r.work_order_number"}
+  heat_code:          {type: str,      sql: "p.HeatCode",        pg: "r.heat_code"}
+
+  # The rework code. SQL Server keeps it in the column named Rework_Reason.
+  rework_code:        {type: str,      sql: "r.Rework_Reason",   pg: "r.rework_id"}
+  rework_qty:         {type: int,      sql: "r.Rework_Qty",      pg: "r.rework_quantity"}
+
+info:
+  sqlserver:
+    shift_production_id: "r.ID"
+    updated_by: "r.UpdatedBy"
+    updated_at: "r.UpdatedTS"
+  postgres:
+    shift_id: "r.shift_id"
+    rework_iot_id: "r.rework_iot_id"
+    rework_reason: "r.rework_reason"
+    updated_by: "r.updated_by"
+    updated_at: "r.updated_at"
+
+not_compared:
+  rework_reason: "Postgres only: the code's description from rework_information. SQL Server's Rework_Reason holds the code itself and is compared as rework_code"
+  updated_by: "Audit column; values differ by design ('PCT' vs 'agg_service' / 're_agg_service')"
+  updated_at: "Audit column; time of aggregation"
+
+known_differences: []
+
+report:
+  sums:
+    "Sum marked-for-rework qty":  {column: rework_qty}

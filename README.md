@@ -28,7 +28,7 @@ From the `Raw OEE` folder:
 
 ```
 python -m oee_validator --machines oee_validator/machines.csv
-python -m pytest oee_validator/tests -q            # engine tests, no database needed
+python -m pytest oee_validator/tests -q            # engine and screen tests, no database needed
 ```
 
 | Option | Meaning |
@@ -47,6 +47,38 @@ row passes (known gaps allowed). `1` means at least one unexplained difference. 
 such as a bad machine list or a connection problem. A row with more records than `max_rows_per_side`
 is skipped, shown as `ERROR`, and the run continues with the next row (exit code `2`).
 So the tool can run as a scheduled job.
+
+### Screens (for testers)
+
+The same comparison with screens instead of files. Double-click `oee_validator\start_ui.cmd`, or:
+
+```
+streamlit run oee_validator/ui.py --server.address localhost
+```
+
+and open http://localhost:8501. On the left you choose:
+
+| Setting | Meaning |
+|---|---|
+| Machines | Read from both machine masters. Machines missing from one master, or listed twice, are shown separately and cannot be picked |
+| From date + time, To date + time | The window `[From, To)`. With **One comparison per day** (on by default) a longer window is split into 24-hour logical days starting at the From time; off, the whole window is one comparison. At most 100 comparisons per run |
+| Tables | Any of the configured tables; datatypes for the tables that have them |
+| Options | Lenient compare, exact time, one Excel sheet per machine, also save the reports to `reports/` |
+
+After **Run comparison** the page shows:
+
+* **Overview**: one row per machine and logical day with the verdict of every table. Click a row to open it.
+* **Summary**: findings, verdict per table, data coverage, known gaps.
+* **One view per table**: record counts and totals side by side, columns with differences, the records
+  (filter by result or by differing column; click a record to see every column of both systems side by side
+  with the SQL used), every differing value, invalid records, known gaps and the columns not compared with the reason.
+* **Run info & mapping**: run settings, how each side selects records, pairing keys and the full column mapping.
+
+The Markdown and Excel reports of every comparison can be downloaded (one, or all as a .zip). They are the same
+files the command line writes. The screens use the same database access as the command line (see "Cockpit" below) and read the
+passwords from `oee_validator/.env`.
+`--server.address localhost` keeps the screens on this PC. Opening them to the network (`0.0.0.0`) lets anyone who
+can reach the PC run comparisons against both databases with the passwords in `.env`; agree that with IT first.
 
 ### machines.csv
 
@@ -102,7 +134,8 @@ cannot store `mst_time > nd_time`; such SQL Server rows are still selected by ca
 ## How the comparison works
 
 1. **Fetch.** For each row, both databases are queried in parallel with the same machine, logical day
-   and datatypes. Only SELECT statements are sent, and the Postgres session is read-only.
+   and datatypes. For tables only SELECT statements are sent, and the Postgres session is read-only
+   (the cockpit is the one exception, see below).
 2. **Normalise.** Every value becomes exact text in Polars. `1.50000` equals `1.5`, but
    `1.50001` does not. Status codes are compared by meaning (`aliases.yaml`). Predefined
    down codes are matched by name (`NO_DATA` = `no_data`). Postgres autodata iot ids are joined
@@ -117,6 +150,25 @@ cannot store `mst_time > nd_time`; such SQL Server rows are still selected by ca
 **Verdict per machine and table:** `PASS` means every record matches.
 `PASS (known gaps only)` means the only differences are listed known gaps. `FAIL` means at least one
 unexplained difference. `NO DATA` means neither system has records in the logical day.
+
+### Cockpit (Iconic View)
+
+`config/tables/cockpit.yaml` compares the figures of the Cockpit / Iconic View screen: SQL Server
+`dbo.s_GetCockpitData` against Postgres `analytics_live.get_cockpit_details(..., 'machine_wise')`.
+These are report procedures, so they are **executed**, not selected from:
+
+* Per machines.csv row they are called for every shift that starts in the logical day (SQL Server
+  `dbo.shiftdetails`) and for the whole logical day. Rows pair on machine + window.
+* Every call runs in its own transaction that is **always rolled back**. The procedures and every routine
+  they call were reviewed on 2026-11-12 and write only to temp tables.
+* `reviewed:` in the YAML holds the SHA-256 of each reviewed definition. If any of them differs on the server,
+  the run stops with "definition ... changed since it was reviewed" before anything is executed. Re-review the
+  change, then update the hash (or leave `cockpit` out of the run with `--tables`).
+* Every column either procedure returns is accounted for: the 30 SQL Server columns are compared, the
+  Postgres-only columns are shown on each record and listed under "columns not compared". A column that a
+  procedure starts returning later is reported as a finding until it is mapped.
+* Efficiencies and return per hour are compared at 2 decimals (half away from zero), as both screens show them.
+  Times are compared as the display strings each screen shows (`hh:mm:ss`).
 
 ### Time precision
 
@@ -147,7 +199,7 @@ separately as an invalid record, so a missing master never shows up as a false d
 
 | File | Holds |
 |---|---|
-| `config/tables/rawdata.yaml`, `autodata.yaml` | Column mapping, pairing key, machine filter, time precision, known differences, report counts |
+| `config/tables/*.yaml` | One file per comparison: rawdata, autodata, shift_production, shift_down, shift_rejection, shift_rework (tables) and cockpit (procedures). Column mapping, pairing key, machine filter, time precision, known differences, report counts |
 | `config/aliases.yaml` | Status-code meanings and predefined down-code spellings |
 | `config/connections.yaml` | Servers and the row limit per side (`max_rows_per_side`) |
 
@@ -158,6 +210,7 @@ To add a table pair, copy `autodata.yaml`. It then appears in the run automatica
 | File | Does |
 |---|---|
 | `run.py` | Command line, exit codes |
+| `ui.py` | Screens (Streamlit): choose machines, days and tables; browse every result |
 | `core/pipeline.py` | One run: check machines, fetch, compare, metrics, findings |
 | `core/db.py` | Read-only connections and query building |
 | `core/normalize.py` | Exact canonical text per column type (vectorised Polars, exact fallback) |

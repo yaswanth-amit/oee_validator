@@ -3,7 +3,8 @@
 Every value becomes either null (SQL NULL) or a string, and equality of those strings is
 the comparison rule. The conversion never loses information:
 
-* decimal / float -> exact decimal text, trailing zeros removed (1.50000 == 1.5, 1.50001 != 1.5).
+* decimal / float -> exact decimal text, trailing zeros removed (1.50000 == 1.5, 1.50001 != 1.5);
+                     a column with `round: n` is first rounded to n places half away from zero.
                      Floats go through repr(), their shortest exact form.
 * int             -> integer text; a non-integral value is shown as '<not an integer: ...>'.
 * datetime        -> 'YYYY-MM-DD HH:MM:SS.ffffff' (exact), or, with datetime_precision
@@ -24,7 +25,7 @@ from __future__ import annotations
 
 import math
 from datetime import date, datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 import polars as pl
 
@@ -59,6 +60,15 @@ def canon_decimal(v) -> str | None:
     if d == 0:
         return "0"
     return format(d.normalize(), "f")
+
+
+def round_text(text: str | None, places: int) -> str | None:
+    """Round canonical decimal text half away from zero (as SQL ROUND does): '19.875' -> '19.88'.
+    Markers ('<not a number ...>'), NaN and infinity are kept as they are."""
+    if text is None or text.startswith("<") or text in ("NaN", "inf", "-inf"):
+        return text
+    d = Decimal(text).quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+    return canon_decimal(d)
 
 
 def canon_int(v) -> str | None:
@@ -194,7 +204,10 @@ def canonical_series(values: list, col: ColumnSpec, side: str, aliases: Aliases,
     if t == "int":
         return _int_series(values)
     if t in ("decimal", "float"):
-        return pl.Series([canon_decimal(v) for v in values], dtype=pl.String)
+        out = [canon_decimal(v) for v in values]
+        if col.round is not None:
+            out = [round_text(x, col.round) for x in out]
+        return pl.Series(out, dtype=pl.String)
     if t == "datetime":
         return _datetime_series(values, precision)
     if t == "date":

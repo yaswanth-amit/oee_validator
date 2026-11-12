@@ -88,6 +88,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         specs = load_table_specs()
         datatypes = _datatypes(args.datatypes, list(specs))
+        for t in datatypes:
+            if "datatype" not in specs[t].columns:
+                raise argparse.ArgumentTypeError(f"--datatypes: table {t!r} has no datatype column")
 
         # imported late so that --help works without the database drivers
         from .core.excel import write_workbook
