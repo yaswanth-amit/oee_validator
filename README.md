@@ -153,6 +153,9 @@ unexplained difference. `NO DATA` means neither system has records in the logica
 
 ### Cockpit (Iconic View)
 
+> **Disabled for now.** `config/tables/cockpit.yaml` is fully commented out, so the cockpit is not
+> loaded, not offered in the UI and not run from the command line. Uncomment the file to bring it back.
+
 `config/tables/cockpit.yaml` compares the figures of the Cockpit / Iconic View screen: SQL Server
 `dbo.s_GetCockpitData` against Postgres `analytics_live.get_cockpit_details(..., 'machine_wise')`.
 These are report procedures, so they are **executed**, not selected from:

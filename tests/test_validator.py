@@ -688,6 +688,9 @@ def test_shift_down_spec_and_bool_flags_from_tinyint():
 
 # --------------------------------------------------------------------------- cockpit (report procedures)
 
+# cockpit.yaml is commented out for now; its tests come back when the file is re-enabled.
+needs_cockpit = pytest.mark.skipif("cockpit" not in SPECS, reason="cockpit.yaml is disabled")
+
 class _FakeCursor:
     def __init__(self, log, cols, rows, fail=False):
         self.log, self.cols, self.rows, self.fail = log, cols, rows, fail
@@ -722,6 +725,7 @@ class _FakeConn:
         self.log.append("ROLLBACK")
 
 
+@needs_cockpit
 def test_cockpit_spec_maps_every_sql_server_column():
     from oee_validator.core.config import load_table_specs
     cock = load_table_specs()["cockpit"]
@@ -733,6 +737,7 @@ def test_cockpit_spec_maps_every_sql_server_column():
     assert cock.columns["quality_efficiency"].round == 2
 
 
+@needs_cockpit
 def test_procedure_calls_are_always_rolled_back():
     from oee_validator.core.db import call_procedure
     cock = SPECS["cockpit"]
@@ -756,6 +761,7 @@ def test_shift_windows_inside_the_logical_day():
     assert [(n, s.hour, e.day) for n, s, e in w] == [("Shift-A", 6, 5), ("Shift-B", 14, 5), ("Shift-C", 22, 6)]
 
 
+@needs_cockpit
 def test_cockpit_rounding_projection_and_unmapped_columns():
     from oee_validator.core.pipeline import _stack, project, unmapped_columns
     cock = SPECS["cockpit"]
@@ -777,6 +783,7 @@ def test_cockpit_rounding_projection_and_unmapped_columns():
     assert rec["return_per_hour_total_ok"] and rec["cn_ok"]                 # 19.875 -> 19.88, 20670.0 == 20670.000
 
 
+@needs_cockpit
 def test_changed_procedure_definition_refuses_the_run(monkeypatch):
     from oee_validator.core import pipeline
     from oee_validator.core.config import ConfigError

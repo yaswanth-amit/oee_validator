@@ -152,7 +152,7 @@ with st.sidebar:
                                           help="Leave empty to compare every datatype.")
 
     with st.expander("Options"):
-        lenient = st.checkbox("Lenient compare", help="Trim spaces, treat blank as NULL, ignore leading zeros in ids")
+        lenient = st.checkbox("Lenient compare", value=True, help="Trim spaces, treat blank as NULL, ignore leading zeros in ids")
         exact_time = st.checkbox("Exact time (microseconds)",
                                  help="Off: Postgres timestamps are rounded to SQL Server datetime steps (1/300 s)")
         sheet_per_machine = st.checkbox("Excel: one comparison sheet per machine")

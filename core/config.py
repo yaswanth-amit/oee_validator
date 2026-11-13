@@ -344,5 +344,7 @@ def parse_table(raw: dict, source: str = "<table>") -> TableSpec:
 
 
 def load_table_specs(directory: Path = TABLES_DIR) -> dict[str, TableSpec]:
-    specs = [parse_table(_read_yaml(p), p.name) for p in sorted(directory.glob("*.yaml"))]
+    # A file with no settings (e.g. fully commented out, like cockpit.yaml for now) is skipped.
+    raw = [(_read_yaml(p), p.name) for p in sorted(directory.glob("*.yaml"))]
+    specs = [parse_table(data, name) for data, name in raw if data]
     return {s.name: s for s in sorted(specs, key=lambda s: (s.order, s.name))}

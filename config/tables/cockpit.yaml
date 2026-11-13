@@ -1,207 +1,210 @@
-# cockpit: the Cockpit / Iconic View (IonicView.aspx) figures per machine.
-#   SQL Server: EXEC dbo.s_GetCockpitData @StartTime, @EndTime, @MachineID, @PlantID
-#   Postgres:   analytics_live.get_cockpit_details(start, end, plant, group, machine, 'machine_wise')
+# DISABLED for now: the whole cockpit comparison is commented out. To re-enable, remove the
+# leading "# " from every line below (the validator skips a file that contains no settings).
 #
-# kind: procedure - instead of a SELECT, each side's report procedure is executed once per window
-# (every shift starting in the logical day, plus the whole logical day). Safety:
-#   * every call runs in its own transaction that is ALWAYS rolled back;
-#   * both procedures and every routine they call were reviewed on 2026-11-12 and write only to
-#     temp tables (#CockpitData, temp_cockpit_*, temp_shift_details). `reviewed` holds the SHA-256 of
-#     each reviewed definition; if any definition on the server differs, the whole run is refused
-#     until it is re-reviewed and the hash updated here (or this table is left out of the run).
+# # cockpit: the Cockpit / Iconic View (IonicView.aspx) figures per machine.
+# #   SQL Server: EXEC dbo.s_GetCockpitData @StartTime, @EndTime, @MachineID, @PlantID
+# #   Postgres:   analytics_live.get_cockpit_details(start, end, plant, group, machine, 'machine_wise')
+# #
+# # kind: procedure - instead of a SELECT, each side's report procedure is executed once per window
+# # (every shift starting in the logical day, plus the whole logical day). Safety:
+# #   * every call runs in its own transaction that is ALWAYS rolled back;
+# #   * both procedures and every routine they call were reviewed on 2026-11-12 and write only to
+# #     temp tables (#CockpitData, temp_cockpit_*, temp_shift_details). `reviewed` holds the SHA-256 of
+# #     each reviewed definition; if any definition on the server differs, the whole run is refused
+# #     until it is re-reviewed and the hash updated here (or this table is left out of the run).
+# #
+# # Every column the procedures return is accounted for: the 30 SQL Server columns are compared with
+# # their Postgres counterparts; the Postgres-only columns are shown (info) and listed under
+# # not_compared. A newly returned, unmapped column is reported as a finding.
 #
-# Every column the procedures return is accounted for: the 30 SQL Server columns are compared with
-# their Postgres counterparts; the Postgres-only columns are shown (info) and listed under
-# not_compared. A newly returned, unmapped column is reported as a finding.
-
-name: cockpit
-order: 5
-label: "cockpit  -  dbo.s_GetCockpitData  vs  analytics_live.get_cockpit_details (Iconic View)"
-kind: procedure
-
-procedure:
-  sqlserver:
-    call: "EXEC dbo.s_GetCockpitData @StartTime = {start}, @EndTime = {end}, @MachineID = {machine}, @PlantID = N''"
-    machine: machine_name
-    reviewed:
-      dbo.s_GetCockpitData:      f397bee32c9a51feffe4e4a8e509b37a0ea7d86cf9efd3c1b731b2eb490e1c04
-      dbo.s_getLastWorkingShift: 5812c98cdb0703853fe2f6aaaa39b587169265a2115bf6b06b5a084a1f916b3f
-      dbo.f_FormatTime:          81f1aa334f00be352731e09ee0f36d8a69aafb53fbb0f6ac48308ebb152021a3
-      dbo.f_GetLogicalDay:       be4add2cc5ee15feca410943c6d4a6b2076bb903ba2545494b5c7b22ea23fd41
-      dbo.f_GetLogicalDayStart:  abf01466866954adb50260717432b430608d3a8758e83598b1916d85551f86ba
-  postgres:
-    call: >-
-      SELECT * FROM analytics_live.get_cockpit_details({start}::timestamp, {end}::timestamp,
-      NULL, NULL, {machine}, 'machine_wise')
-    machine: machine_name
-    reviewed:
-      analytics_live.get_cockpit_details:      030cbbf3e9f34de95c83965ab555c8a75c71b018ca15aeace7d0ce5b4dfabe96
-      dashboard.calc_co_wise_setup_time:       771b7eab3a13614100f123abade0e6667a053d96e1b2e8cf18c4be2a70bdec2e
-      dashboard.calc_co_wise_setup_time_pdt:   3c4baa986328599100fd34bdfbdea5bd61fdbade0ef3c4ebe505042d84a2dd26
-      dashboard.calc_downcode_wise_downtime:   882fb6452bdbe2c133f8a0af021791ec3e3327d7d10d9aea6c8d357f2838c1b7
-      dashboard.calc_downcode_wise_downtime_pdt: f203418fc8ba8f39c4abca1534da8eba1d7de13c8e7853e908f204622101605a
-      dashboard.calc_ideal_target:             45b5b5fc861a4ec6dc234111d511c833114e61555713ad2e612398a1c6e96105
-      dashboard.calc_ideal_target_pdt:         eb3232e6925eced9c13b3a85fcc821ffc54bb4302dc2ea39f5ca2b7894667b87
-      dashboard.calc_production_metrics:       17bda45f02a77498b5a5d8e042d9a86e173b8d77f1edbf4e975dde172582273c
-      dashboard.calc_production_metrics_pdt:   625c5fcc1d2021fd297dec265f04d1bb07038e15b7be2343d5e05c2eb89c9e3e
-      dashboard.calc_rejection_count:          026c577a950e9d62d5e78b162545493e9f7c0e258dfe3d7117116cea67f408a8
-      utility.get_cycle_type:                  a9048ca0d91823d721a85333f4643a1559136a87ebe738912e83a99bf8d71171
-      utility.get_formated_time:               95dbe37a0e4a99d527b92c8c60d8931f8fa524d97d515cb3c201dbe11fecdc5c
-      utility.get_logical_day:                 42d4fc998c208dec6733e5fd965e69c38a0248c3976d00e471d36a55020d6765
-      utility.get_shifts:                      792a5e21483b5ddb597de6b523743ca47c87fe5aec1e67e316b34f94e0939c0d
-
-# Windows per machines.csv row: every shift (SQL Server dbo.shiftdetails) that starts inside the
-# logical day, plus the whole logical day.
-windows: [shifts, day]
-
-# Added by the validator to every returned row: window_name, window_start, window_end.
-time_column: window_start
-
-machine_key:
-  sqlserver: machine_name
-  postgres: machine_name
-
-datetime_precision: sqlserver_datetime
-
-key: [machine, window_start, window_end]
-
-# sql / pg = the result column name each procedure returns.
-# Efficiencies and return per hour are shown with 2 decimals on both screens: SQL Server returns
-# full precision, Postgres numeric(15,3) already rounded, so both are rounded to 2 places.
-columns:
-  machine:                {type: str,      sql: "MachineID",              pg: "machine_id"}
-  window:                 {type: str,      sql: "window_name",            pg: "window_name"}
-  window_start:           {type: datetime, sql: "window_start",           pg: "window_start"}
-  window_end:             {type: datetime, sql: "window_end",             pg: "window_end"}
-  start_time:             {type: datetime, sql: "StartTime",              pg: "start_time"}
-  end_time:               {type: datetime, sql: "EndTime",                pg: "end_time"}
-  plant:                  {type: str,      sql: "Remarks2",               pg: "plant_id"}
-  production_efficiency:  {type: decimal,  sql: "ProductionEfficiency",   pg: "production_efficiency",   round: 2}
-  availability_efficiency: {type: decimal, sql: "AvailabilityEfficiency", pg: "availability_efficiency", round: 2}
-  quality_efficiency:     {type: decimal,  sql: "QualityEfficiency",      pg: "quality_efficiency",      round: 2}
-  overall_efficiency:     {type: decimal,  sql: "OverAllEfficiency",      pg: "overall_efficiency",      round: 2}
-  components:             {type: decimal,  sql: "Components",             pg: "total_count"}
-  rejections:             {type: decimal,  sql: "RejCount",               pg: "rejected_count"}
-  cn:                     {type: decimal,  sql: "CN",                     pg: "cn"}
-  utilised_time:          {type: decimal,  sql: "UtilisedTime",           pg: "utilised_time"}
-  turn_over:              {type: decimal,  sql: "TurnOver",               pg: "turn_over"}
-  return_per_hour:        {type: decimal,  sql: "ReturnPerHour",          pg: "return_per_hour",         round: 2}
-  return_per_hour_total:  {type: decimal,  sql: "ReturnPerHourTOTAL",     pg: "return_per_hour_total",   round: 2}
-  # display strings, exactly as each screen shows them (formatted with each system's time format)
-  utilised_time_text:     {type: str,      sql: "StrUtilisedTime",        pg: "f_utilised_time"}
-  down_time_text:         {type: str,      sql: "DownTime",               pg: "f_down_time"}
-  management_loss_text:   {type: str,      sql: "ManagementLoss",         pg: "f_management_loss"}
-  total_time_text:        {type: str,      sql: "TotalTime",              pg: "f_total_time"}
-  max_down_reason:        {type: str,      sql: "MaxReasonTime",          pg: "max_down_reason"}
-  # SQL Server Remarks1 = running status
-  running_status:        {type: str,      sql: "Remarks1",               pg: "machine_live_status"}
-
-# Shown on every record (info), never compared: the colour thresholds of both systems and the
-# Postgres-only columns. Each is listed below with the reason.
-info:
-  sqlserver:
-    PEGreen: PEGreen
-    PERed: PERed
-    AEGreen: AEGreen
-    AERed: AERed
-    OEGreen: OEGreen
-    OERed: OERed
-    QEGreen: QEGreen
-    QERed: QERed
-    Remarks: Remarks
-  postgres:
-    remarks: remarks
-    pe_green: pe_green
-    pe_red: pe_red
-    ae_green: ae_green
-    ae_red: ae_red
-    oee_green: oee_green
-    oee_red: oee_red
-    qe_green: qe_green
-    qe_red: qe_red
-    group_id: group_id
-    mc: mc
-    operator_efficiency: operator_efficiency
-    accepted_count: accepted_count
-    rework_count: rework_count
-    total_time: total_time
-    down_time: down_time
-    management_loss: management_loss
-    operator_loss: operator_loss
-    f_operator_loss: f_operator_loss
-    net_down_time: net_down_time
-    f_net_down_time: f_net_down_time
-    total_pdt: total_pdt
-    prod_pdt: prod_pdt
-    down_pdt: down_pdt
-    ml_pdt: ml_pdt
-    ol_pdt: ol_pdt
-    f_total_pdt: f_total_pdt
-    f_prod_pdt: f_prod_pdt
-    f_down_pdt: f_down_pdt
-    f_ml_pdt: f_ml_pdt
-    f_ol_pdt: f_ol_pdt
-    opr_green: opr_green
-    opr_red: opr_red
-    last_down_reason: last_down_reason
-    operator_name: operator_name
-    target_count: target_count
-    target_completion_rate: target_completion_rate
-    last_cycle_co: last_cycle_co
-    last_cycle_comp_description: last_cycle_comp_description
-    last_cycle_operation: last_cycle_operation
-    last_cycle_opn_description: last_cycle_opn_description
-    last_cycle_time: last_cycle_time
-    machine_description: machine_description
-    machine_interface_id: machine_interface_id
-    custom_sort_order: custom_sort_order
-
-not_compared:
-  remarks: "Free text with a different meaning on each side (SQL Server Remarks: last cycle / running part or blank; Postgres: 'Machine In Production' / 'Machine Not In Production'); shown on each record"
-  pe_green: "Colour threshold from each system's settings, not a calculated figure (SQL Server PEGreen); shown on each record"
-  pe_red: "Colour threshold from each system's settings, not a calculated figure (SQL Server PERed); shown on each record"
-  ae_green: "Colour threshold from each system's settings, not a calculated figure (SQL Server AEGreen); shown on each record"
-  ae_red: "Colour threshold from each system's settings, not a calculated figure (SQL Server AERed); shown on each record"
-  oee_green: "Colour threshold from each system's settings, not a calculated figure (SQL Server OEGreen); shown on each record"
-  oee_red: "Colour threshold from each system's settings, not a calculated figure (SQL Server OERed); shown on each record"
-  qe_green: "Colour threshold from each system's settings, not a calculated figure (SQL Server QEGreen); shown on each record"
-  qe_red: "Colour threshold from each system's settings, not a calculated figure (SQL Server QERed); shown on each record"
-  group_id: "Postgres only (s_GetCockpitData does not return the cell)"
-  mc: "Postgres only (internal machine iot id)"
-  operator_efficiency: "Postgres only (s_GetCockpitData has no operator efficiency)"
-  accepted_count: "Postgres only (SQL Server returns Components and RejCount, both compared)"
-  rework_count: "Postgres only"
-  total_time: "Postgres only as seconds; the displayed total time is compared (total_time_text)"
-  down_time: "Postgres only as seconds; the displayed down time is compared (down_time_text)"
-  management_loss: "Postgres only as seconds; the displayed management loss is compared (management_loss_text)"
-  operator_loss: "Postgres only"
-  f_operator_loss: "Postgres only"
-  net_down_time: "Postgres only"
-  f_net_down_time: "Postgres only"
-  total_pdt: "Postgres only (planned downtime breakdown)"
-  prod_pdt: "Postgres only (planned downtime breakdown)"
-  down_pdt: "Postgres only (planned downtime breakdown)"
-  ml_pdt: "Postgres only (planned downtime breakdown)"
-  ol_pdt: "Postgres only (planned downtime breakdown)"
-  f_total_pdt: "Postgres only (planned downtime breakdown)"
-  f_prod_pdt: "Postgres only (planned downtime breakdown)"
-  f_down_pdt: "Postgres only (planned downtime breakdown)"
-  f_ml_pdt: "Postgres only (planned downtime breakdown)"
-  f_ol_pdt: "Postgres only (planned downtime breakdown)"
-  opr_green: "Postgres only (operator efficiency colours)"
-  opr_red: "Postgres only (operator efficiency colours)"
-  last_down_reason: "Postgres only"
-  operator_name: "Postgres only"
-  target_count: "Postgres only"
-  target_completion_rate: "Postgres only"
-  last_cycle_co: "Postgres only (SQL Server puts the last cycle in Remarks, compared)"
-  last_cycle_comp_description: "Postgres only"
-  last_cycle_operation: "Postgres only"
-  last_cycle_opn_description: "Postgres only"
-  last_cycle_time: "Postgres only"
-  machine_description: "Postgres only"
-  machine_interface_id: "Postgres only"
-  custom_sort_order: "Postgres only"
-
-known_differences: []
-# No report sums: the shift rows and the whole-day row overlap, so a sum would count twice.
+# name: cockpit
+# order: 5
+# label: "cockpit  -  dbo.s_GetCockpitData  vs  analytics_live.get_cockpit_details (Iconic View)"
+# kind: procedure
+#
+# procedure:
+#   sqlserver:
+#     call: "EXEC dbo.s_GetCockpitData @StartTime = {start}, @EndTime = {end}, @MachineID = {machine}, @PlantID = N''"
+#     machine: machine_name
+#     reviewed:
+#       dbo.s_GetCockpitData:      f397bee32c9a51feffe4e4a8e509b37a0ea7d86cf9efd3c1b731b2eb490e1c04
+#       dbo.s_getLastWorkingShift: 5812c98cdb0703853fe2f6aaaa39b587169265a2115bf6b06b5a084a1f916b3f
+#       dbo.f_FormatTime:          81f1aa334f00be352731e09ee0f36d8a69aafb53fbb0f6ac48308ebb152021a3
+#       dbo.f_GetLogicalDay:       be4add2cc5ee15feca410943c6d4a6b2076bb903ba2545494b5c7b22ea23fd41
+#       dbo.f_GetLogicalDayStart:  abf01466866954adb50260717432b430608d3a8758e83598b1916d85551f86ba
+#   postgres:
+#     call: >-
+#       SELECT * FROM analytics_live.get_cockpit_details({start}::timestamp, {end}::timestamp,
+#       NULL, NULL, {machine}, 'machine_wise')
+#     machine: machine_name
+#     reviewed:
+#       analytics_live.get_cockpit_details:      030cbbf3e9f34de95c83965ab555c8a75c71b018ca15aeace7d0ce5b4dfabe96
+#       dashboard.calc_co_wise_setup_time:       771b7eab3a13614100f123abade0e6667a053d96e1b2e8cf18c4be2a70bdec2e
+#       dashboard.calc_co_wise_setup_time_pdt:   3c4baa986328599100fd34bdfbdea5bd61fdbade0ef3c4ebe505042d84a2dd26
+#       dashboard.calc_downcode_wise_downtime:   882fb6452bdbe2c133f8a0af021791ec3e3327d7d10d9aea6c8d357f2838c1b7
+#       dashboard.calc_downcode_wise_downtime_pdt: f203418fc8ba8f39c4abca1534da8eba1d7de13c8e7853e908f204622101605a
+#       dashboard.calc_ideal_target:             45b5b5fc861a4ec6dc234111d511c833114e61555713ad2e612398a1c6e96105
+#       dashboard.calc_ideal_target_pdt:         eb3232e6925eced9c13b3a85fcc821ffc54bb4302dc2ea39f5ca2b7894667b87
+#       dashboard.calc_production_metrics:       17bda45f02a77498b5a5d8e042d9a86e173b8d77f1edbf4e975dde172582273c
+#       dashboard.calc_production_metrics_pdt:   625c5fcc1d2021fd297dec265f04d1bb07038e15b7be2343d5e05c2eb89c9e3e
+#       dashboard.calc_rejection_count:          026c577a950e9d62d5e78b162545493e9f7c0e258dfe3d7117116cea67f408a8
+#       utility.get_cycle_type:                  a9048ca0d91823d721a85333f4643a1559136a87ebe738912e83a99bf8d71171
+#       utility.get_formated_time:               95dbe37a0e4a99d527b92c8c60d8931f8fa524d97d515cb3c201dbe11fecdc5c
+#       utility.get_logical_day:                 42d4fc998c208dec6733e5fd965e69c38a0248c3976d00e471d36a55020d6765
+#       utility.get_shifts:                      792a5e21483b5ddb597de6b523743ca47c87fe5aec1e67e316b34f94e0939c0d
+#
+# # Windows per machines.csv row: every shift (SQL Server dbo.shiftdetails) that starts inside the
+# # logical day, plus the whole logical day.
+# windows: [shifts, day]
+#
+# # Added by the validator to every returned row: window_name, window_start, window_end.
+# time_column: window_start
+#
+# machine_key:
+#   sqlserver: machine_name
+#   postgres: machine_name
+#
+# datetime_precision: sqlserver_datetime
+#
+# key: [machine, window_start, window_end]
+#
+# # sql / pg = the result column name each procedure returns.
+# # Efficiencies and return per hour are shown with 2 decimals on both screens: SQL Server returns
+# # full precision, Postgres numeric(15,3) already rounded, so both are rounded to 2 places.
+# columns:
+#   machine:                {type: str,      sql: "MachineID",              pg: "machine_id"}
+#   window:                 {type: str,      sql: "window_name",            pg: "window_name"}
+#   window_start:           {type: datetime, sql: "window_start",           pg: "window_start"}
+#   window_end:             {type: datetime, sql: "window_end",             pg: "window_end"}
+#   start_time:             {type: datetime, sql: "StartTime",              pg: "start_time"}
+#   end_time:               {type: datetime, sql: "EndTime",                pg: "end_time"}
+#   plant:                  {type: str,      sql: "Remarks2",               pg: "plant_id"}
+#   production_efficiency:  {type: decimal,  sql: "ProductionEfficiency",   pg: "production_efficiency",   round: 2}
+#   availability_efficiency: {type: decimal, sql: "AvailabilityEfficiency", pg: "availability_efficiency", round: 2}
+#   quality_efficiency:     {type: decimal,  sql: "QualityEfficiency",      pg: "quality_efficiency",      round: 2}
+#   overall_efficiency:     {type: decimal,  sql: "OverAllEfficiency",      pg: "overall_efficiency",      round: 2}
+#   components:             {type: decimal,  sql: "Components",             pg: "total_count"}
+#   rejections:             {type: decimal,  sql: "RejCount",               pg: "rejected_count"}
+#   cn:                     {type: decimal,  sql: "CN",                     pg: "cn"}
+#   utilised_time:          {type: decimal,  sql: "UtilisedTime",           pg: "utilised_time"}
+#   turn_over:              {type: decimal,  sql: "TurnOver",               pg: "turn_over"}
+#   return_per_hour:        {type: decimal,  sql: "ReturnPerHour",          pg: "return_per_hour",         round: 2}
+#   return_per_hour_total:  {type: decimal,  sql: "ReturnPerHourTOTAL",     pg: "return_per_hour_total",   round: 2}
+#   # display strings, exactly as each screen shows them (formatted with each system's time format)
+#   utilised_time_text:     {type: str,      sql: "StrUtilisedTime",        pg: "f_utilised_time"}
+#   down_time_text:         {type: str,      sql: "DownTime",               pg: "f_down_time"}
+#   management_loss_text:   {type: str,      sql: "ManagementLoss",         pg: "f_management_loss"}
+#   total_time_text:        {type: str,      sql: "TotalTime",              pg: "f_total_time"}
+#   max_down_reason:        {type: str,      sql: "MaxReasonTime",          pg: "max_down_reason"}
+#   # SQL Server Remarks1 = running status
+#   running_status:        {type: str,      sql: "Remarks1",               pg: "machine_live_status"}
+#
+# # Shown on every record (info), never compared: the colour thresholds of both systems and the
+# # Postgres-only columns. Each is listed below with the reason.
+# info:
+#   sqlserver:
+#     PEGreen: PEGreen
+#     PERed: PERed
+#     AEGreen: AEGreen
+#     AERed: AERed
+#     OEGreen: OEGreen
+#     OERed: OERed
+#     QEGreen: QEGreen
+#     QERed: QERed
+#     Remarks: Remarks
+#   postgres:
+#     remarks: remarks
+#     pe_green: pe_green
+#     pe_red: pe_red
+#     ae_green: ae_green
+#     ae_red: ae_red
+#     oee_green: oee_green
+#     oee_red: oee_red
+#     qe_green: qe_green
+#     qe_red: qe_red
+#     group_id: group_id
+#     mc: mc
+#     operator_efficiency: operator_efficiency
+#     accepted_count: accepted_count
+#     rework_count: rework_count
+#     total_time: total_time
+#     down_time: down_time
+#     management_loss: management_loss
+#     operator_loss: operator_loss
+#     f_operator_loss: f_operator_loss
+#     net_down_time: net_down_time
+#     f_net_down_time: f_net_down_time
+#     total_pdt: total_pdt
+#     prod_pdt: prod_pdt
+#     down_pdt: down_pdt
+#     ml_pdt: ml_pdt
+#     ol_pdt: ol_pdt
+#     f_total_pdt: f_total_pdt
+#     f_prod_pdt: f_prod_pdt
+#     f_down_pdt: f_down_pdt
+#     f_ml_pdt: f_ml_pdt
+#     f_ol_pdt: f_ol_pdt
+#     opr_green: opr_green
+#     opr_red: opr_red
+#     last_down_reason: last_down_reason
+#     operator_name: operator_name
+#     target_count: target_count
+#     target_completion_rate: target_completion_rate
+#     last_cycle_co: last_cycle_co
+#     last_cycle_comp_description: last_cycle_comp_description
+#     last_cycle_operation: last_cycle_operation
+#     last_cycle_opn_description: last_cycle_opn_description
+#     last_cycle_time: last_cycle_time
+#     machine_description: machine_description
+#     machine_interface_id: machine_interface_id
+#     custom_sort_order: custom_sort_order
+#
+# not_compared:
+#   remarks: "Free text with a different meaning on each side (SQL Server Remarks: last cycle / running part or blank; Postgres: 'Machine In Production' / 'Machine Not In Production'); shown on each record"
+#   pe_green: "Colour threshold from each system's settings, not a calculated figure (SQL Server PEGreen); shown on each record"
+#   pe_red: "Colour threshold from each system's settings, not a calculated figure (SQL Server PERed); shown on each record"
+#   ae_green: "Colour threshold from each system's settings, not a calculated figure (SQL Server AEGreen); shown on each record"
+#   ae_red: "Colour threshold from each system's settings, not a calculated figure (SQL Server AERed); shown on each record"
+#   oee_green: "Colour threshold from each system's settings, not a calculated figure (SQL Server OEGreen); shown on each record"
+#   oee_red: "Colour threshold from each system's settings, not a calculated figure (SQL Server OERed); shown on each record"
+#   qe_green: "Colour threshold from each system's settings, not a calculated figure (SQL Server QEGreen); shown on each record"
+#   qe_red: "Colour threshold from each system's settings, not a calculated figure (SQL Server QERed); shown on each record"
+#   group_id: "Postgres only (s_GetCockpitData does not return the cell)"
+#   mc: "Postgres only (internal machine iot id)"
+#   operator_efficiency: "Postgres only (s_GetCockpitData has no operator efficiency)"
+#   accepted_count: "Postgres only (SQL Server returns Components and RejCount, both compared)"
+#   rework_count: "Postgres only"
+#   total_time: "Postgres only as seconds; the displayed total time is compared (total_time_text)"
+#   down_time: "Postgres only as seconds; the displayed down time is compared (down_time_text)"
+#   management_loss: "Postgres only as seconds; the displayed management loss is compared (management_loss_text)"
+#   operator_loss: "Postgres only"
+#   f_operator_loss: "Postgres only"
+#   net_down_time: "Postgres only"
+#   f_net_down_time: "Postgres only"
+#   total_pdt: "Postgres only (planned downtime breakdown)"
+#   prod_pdt: "Postgres only (planned downtime breakdown)"
+#   down_pdt: "Postgres only (planned downtime breakdown)"
+#   ml_pdt: "Postgres only (planned downtime breakdown)"
+#   ol_pdt: "Postgres only (planned downtime breakdown)"
+#   f_total_pdt: "Postgres only (planned downtime breakdown)"
+#   f_prod_pdt: "Postgres only (planned downtime breakdown)"
+#   f_down_pdt: "Postgres only (planned downtime breakdown)"
+#   f_ml_pdt: "Postgres only (planned downtime breakdown)"
+#   f_ol_pdt: "Postgres only (planned downtime breakdown)"
+#   opr_green: "Postgres only (operator efficiency colours)"
+#   opr_red: "Postgres only (operator efficiency colours)"
+#   last_down_reason: "Postgres only"
+#   operator_name: "Postgres only"
+#   target_count: "Postgres only"
+#   target_completion_rate: "Postgres only"
+#   last_cycle_co: "Postgres only (SQL Server puts the last cycle in Remarks, compared)"
+#   last_cycle_comp_description: "Postgres only"
+#   last_cycle_operation: "Postgres only"
+#   last_cycle_opn_description: "Postgres only"
+#   last_cycle_time: "Postgres only"
+#   machine_description: "Postgres only"
+#   machine_interface_id: "Postgres only"
+#   custom_sort_order: "Postgres only"
+#
+# known_differences: []
+# # No report sums: the shift rows and the whole-day row overlap, so a sum would count twice.
