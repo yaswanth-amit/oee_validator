@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oee-validator"
+version = "1.0.0"
+description = "Batch validation tool comparing OEE records between SQL Server and PostgreSQL"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "polars>=1.20",
+    "xlsxwriter>=3.2",
+    "pyodbc>=5.0",
+    "psycopg2-binary>=2.9",
+    "PyYAML>=6.0",
+    "streamlit>=1.30",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "openpyxl>=3.1",
+]
+
+[project.scripts]
+oee-validator = "oee_validator.run:main"
+oee-validator-ui = "oee_validator.ui:main"
+
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["oee_validator*"]
+
+[tool.setuptools.package-data]
+"oee_validator" = ["config/*.yaml", "config/tables/*.yaml", "*.cmd", "*.csv"]
+
